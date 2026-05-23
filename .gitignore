@@ -1,3 +1,4 @@
 .envs/
 __pycache__/
 *.egg-info/
+.karnage_cache/
