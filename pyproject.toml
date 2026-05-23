@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=82", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "karnage"
+version = "0.1.0"
+description = "LLVM playground tooling suite"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "rich",
+]
