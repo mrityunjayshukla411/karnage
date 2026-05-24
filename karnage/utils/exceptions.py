@@ -1,5 +1,5 @@
 class KarnageError(Exception):
-    """Base exception for all chitragupt errors."""
+    """Base exception for all karnage errors."""
 
     def __init__(self, message: str, context: dict | None = None) -> None:
         super().__init__(message)
