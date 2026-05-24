@@ -6,6 +6,7 @@ from .exceptions import (
     LibraryNotFoundError,
     CommitResolutionError,
     LLVMProjectDownloadError,
+    ParserError,
 )
 
 from .targets import (
@@ -19,6 +20,7 @@ __all__ = [
     "LibraryNotFoundError",
     "CommitResolutionError",
     "LLVMProjectDownloadError",
+    "ParserError",
 
     "TargetBackend",
     "NVPTXBackend",
