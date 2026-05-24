@@ -7,7 +7,7 @@ class KarnageError(Exception):
 
 
 class LLVMProjectDownloadError(KarnageError):
-    """libtriton.so (or equivalent target library) was not found."""
+    """LLVM project download failed or got interrupted while"""
 
 class LibraryNotFoundError(KarnageError):
     """libtriton.so (or equivalent target library) was not found."""
@@ -18,3 +18,6 @@ class CommitResolutionError(KarnageError):
 
 class LLVMProjectBuildError(KarnageError):
     """CMake configure or build step for llvm-project failed."""
+
+class ParserError(KarnageError):
+    """Error occured while parsing files related to matcher table"""
