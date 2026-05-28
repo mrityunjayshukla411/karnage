@@ -1,15 +1,29 @@
-from karnage.utils.logger import logger
-from karnage.utils.exceptions import (
-    LibraryNotFoundError,
-    CommitResolutionError,
-    LLVMProjectDownloadError,
-    LLVMProjectBuildError,
-)
+"""LLVM source-tree download and build orchestration.
 
-from karnage.utils.targets import (
-    TargetBackend,
-    NVPTXBackend
+This module handles the three-step process of preparing the LLVM headers
+that the extractor needs:
+
+1. **Detect** — extract the LLVM commit hash embedded in the target binary
+   (``libtriton.so``) via ``strings``.
+2. **Download** — fetch the matching ``llvm-project`` source archive from
+   GitHub if not already cached.
+3. **Build** — run CMake to generate only the tablegen ``.inc`` files required
+   by the target backend; all other LLVM build targets are disabled.
+
+Results are cached under ``.karnage_cache/llvm-<commit>/`` relative to the
+current working directory.  Subsequent calls with the same commit hash skip
+the download and build steps entirely.
+"""
+
+from karnage.utils.exceptions import (
+    CommitResolutionError,
+    LibraryNotFoundError,
+    LLVMProjectBuildError,
+    LLVMProjectDownloadError,
 )
+from karnage.utils.logger import logger
+from karnage.utils.subprocess_runner import run_subprocess
+from karnage.utils.targets import TargetBackend, NVPTXBackend
 
 import re
 import shutil
@@ -18,30 +32,42 @@ from pathlib import Path
 
 
 _LLVM_VERSION_RE = re.compile(
-    r'LLVM version \d+\.\d+\.[^ ]+\s+\(([0-9a-fA-F]{40})\)'
+    r"LLVM version \d+\.\d+\.[^ ]+\s+\(([0-9a-fA-F]{40})\)"
 )
 
-# Evaluated lazily so callers that import this module from a different working
-# directory (e.g. a test suite) get the correct path.
+
 def _cache_root() -> Path:
+    """Return the root directory for per-commit LLVM build caches.
+
+    Evaluated lazily so callers that import this module from a non-standard
+    working directory (e.g. a test suite) get the correct absolute path.
+
+    Returns:
+        ``<cwd>/.karnage_cache`` as an absolute :class:`~pathlib.Path`.
+    """
     return Path.cwd() / ".karnage_cache"
 
 
 def _get_target_library_path(target_lib: str = "triton") -> Path:
-    """
-    Return the absolute path of the target library's shared object using
-    `pip show`.
+    """Auto-detect the shared-object path for an installed Python package.
 
-    The returned path is constructed from the package's install Location plus
-    the canonical in-package sub-path for the given library name.
+    Runs ``pip show <target_lib>`` to find the package install location, then
+    constructs the canonical in-package path
+    ``<Location>/<target_lib>/_C/lib<target_lib>.so``.
+
+    Args:
+        target_lib: Python package name, e.g. ``"triton"``.
+
+    Returns:
+        Absolute path to the shared object (the file may not yet exist if the
+        package is installed but the build artefact is missing).
+
+    Raises:
+        LibraryNotFoundError: If ``pip show`` returns a non-zero exit code,
+            meaning the package is not installed in the current environment.
     """
     try:
-        result = subprocess.run(
-            ["pip", "show", target_lib],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = run_subprocess(["pip", "show", target_lib], timeout=30)
     except subprocess.CalledProcessError as exc:
         raise LibraryNotFoundError(
             f"Target library ({target_lib!r}) not found",
@@ -53,22 +79,31 @@ def _get_target_library_path(target_lib: str = "triton") -> Path:
         for line in result.stdout.splitlines()
         if line.startswith("Location:")
     )
-
-    # Construct the path using target_lib rather than a hardcoded "triton"
-    # so that callers passing a different package name get the right result.
     return Path(location) / target_lib / "_C" / f"lib{target_lib}.so"
 
 
 def _extract_binary_hash(libtriton_path: Path) -> str:
-    """
-    Extract the LLVM commit hash embedded in the binary via the version string.
+    """Extract the 40-character LLVM commit hash baked into the binary.
+
+    Searches the binary's string table (via ``strings``) for a line matching::
+
+        LLVM version X.Y.Z (<40-hex-char commit hash>)
+
+    This version string is embedded by the LLVM build system and is present
+    in every non-stripped ``libtriton.so`` build.
+
+    Args:
+        libtriton_path: Path to the shared object to inspect.
+
+    Returns:
+        40-character lowercase hexadecimal LLVM commit hash.
+
+    Raises:
+        CommitResolutionError: If ``strings`` fails or the expected pattern
+            is not found (e.g. stripped binary or mismatched LLVM version).
     """
     try:
-        result = subprocess.run(
-            ["strings", str(libtriton_path)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, check=True,
-        )
+        result = run_subprocess(["strings", str(libtriton_path)], timeout=60)
     except subprocess.CalledProcessError as exc:
         raise CommitResolutionError(
             f"strings command failed on {libtriton_path}",
@@ -87,11 +122,21 @@ def _extract_binary_hash(libtriton_path: Path) -> str:
 
 
 def _download_archive(url: str, dest_dir: Path) -> None:
-    """
-    Download *url* into *dest_dir*, trying curl first then wget.
+    """Download a URL into *dest_dir*, trying ``curl`` first then ``wget``.
 
-    curl is available on macOS by default; wget on most Linux distros.
-    Using `-f` / `--fail` ensures a non-zero exit on HTTP errors.
+    Both tools are invoked in silent/quiet mode so progress output does not
+    pollute the karnage log.  ``curl -f`` and ``wget`` both return non-zero on
+    HTTP errors (4xx / 5xx), which is propagated as a
+    :exc:`~karnage.utils.exceptions.LLVMProjectDownloadError`.
+
+    Args:
+        url:      Full HTTPS URL to download.
+        dest_dir: Directory to write the downloaded file into; the filename is
+                  taken from the last path component of *url*.
+
+    Raises:
+        LLVMProjectDownloadError: If neither ``curl`` nor ``wget`` is found on
+            PATH, or if the chosen tool exits non-zero.
     """
     filename = url.rsplit("/", 1)[-1]
 
@@ -106,7 +151,7 @@ def _download_archive(url: str, dest_dir: Path) -> None:
         )
 
     try:
-        subprocess.run(cmd, cwd=str(dest_dir), check=True)
+        run_subprocess(cmd, cwd=dest_dir, timeout=1800)
     except subprocess.CalledProcessError as exc:
         raise LLVMProjectDownloadError(
             f"Download failed: {url}",
@@ -119,11 +164,37 @@ def build_llvm(
     target:        TargetBackend,
     force_rebuild: bool = False,
 ) -> Path:
-    """
-    Clone and build the LLVM project at a specific commit, generating only
-    the tablegen targets required by *target*.
+    """Download and build the LLVM tablegen targets for a specific commit.
 
-    Returns the build directory path.
+    The build is cached under ``.karnage_cache/llvm-<commit>/`` and skipped
+    on subsequent calls unless *force_rebuild* is set.  Only the tablegen
+    targets listed in :attr:`~TargetBackend.tablegen_targets` are compiled;
+    all other LLVM build targets (tools, tests, examples, docs) are disabled
+    to keep build times short.
+
+    Directory layout::
+
+        .karnage_cache/
+          llvm-<commit>/
+            repo/      ← extracted llvm-project source
+            build/     ← CMake build tree (only tablegen targets built)
+
+    Args:
+        commit_hash:   40-character LLVM commit hash, as returned by
+                       :func:`_extract_binary_hash`.
+        target:        Backend descriptor that provides the CMake target name
+                       and the list of tablegen targets to build.
+        force_rebuild: When ``True``, delete any existing cache entry and
+                       rebuild from scratch.
+
+    Returns:
+        Path to the CMake build directory (``…/llvm-<commit>/build``).
+
+    Raises:
+        LLVMProjectDownloadError: If the source archive cannot be fetched or
+            extracted.
+        LLVMProjectBuildError:    If CMake configuration or any tablegen build
+            target fails.
     """
     llvm_cache_dir = _cache_root() / f"llvm-{commit_hash}"
     repo_dir  = llvm_cache_dir / "repo"
@@ -144,9 +215,7 @@ def build_llvm(
 
     llvm_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------ #
-    # Download source archive
-    # ------------------------------------------------------------------ #
+    # --- Download ---
     archive_name = f"{commit_hash}.zip"
     archive_path = llvm_cache_dir / archive_name
 
@@ -157,11 +226,7 @@ def build_llvm(
 
         logger.info("Extracting LLVM archive")
         try:
-            subprocess.run(
-                ["unzip", "-q", archive_name],
-                cwd=str(llvm_cache_dir),
-                check=True,
-            )
+            run_subprocess(["unzip", "-q", archive_name], cwd=llvm_cache_dir, timeout=300)
         except subprocess.CalledProcessError as exc:
             raise LLVMProjectDownloadError(
                 "Failed to extract LLVM source archive",
@@ -171,16 +236,14 @@ def build_llvm(
         (llvm_cache_dir / f"llvm-project-{commit_hash}").rename(repo_dir)
         archive_path.unlink(missing_ok=True)
 
-    # ------------------------------------------------------------------ #
-    # CMake configure
-    # ------------------------------------------------------------------ #
+    # --- CMake configure ---
     build_dir.mkdir(parents=True, exist_ok=True)
     cmake_cache = build_dir / "CMakeCache.txt"
 
     if not cmake_cache.exists():
         logger.info(f"Configuring LLVM build for {target.cmake_target_name}")
         try:
-            subprocess.run(
+            run_subprocess(
                 [
                     "cmake",
                     "-S", str(repo_dir / "llvm"),
@@ -193,7 +256,7 @@ def build_llvm(
                     "-DLLVM_INCLUDE_BENCHMARKS=OFF",
                     "-DLLVM_INCLUDE_DOCS=OFF",
                 ],
-                check=True,
+                timeout=600,
             )
         except subprocess.CalledProcessError as exc:
             raise LLVMProjectBuildError(
@@ -201,15 +264,12 @@ def build_llvm(
                 context={"build_dir": str(build_dir), "stderr": exc.stderr},
             ) from exc
 
-    # ------------------------------------------------------------------ #
-    # Build (tablegen targets only)
-    # ------------------------------------------------------------------ #
+    # --- Build tablegen targets ---
     logger.info(f"Building LLVM tablegen targets for {target.name}")
     for tgt in target.tablegen_targets:
         try:
-            subprocess.run(
+            run_subprocess(
                 ["cmake", "--build", str(build_dir), "--target", tgt, "--parallel"],
-                check=True,
             )
         except subprocess.CalledProcessError as exc:
             raise LLVMProjectBuildError(

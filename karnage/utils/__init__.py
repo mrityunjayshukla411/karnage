@@ -6,11 +6,13 @@ from .exceptions import (
     LibraryNotFoundError,
     CommitResolutionError,
     LLVMProjectDownloadError,
+    LLVMProjectBuildError,
     ParserError,
 )
 
 from .targets import (
-    NVPTXBackend
+    TargetBackend,
+    NVPTXBackend,
 )
 
 from .models import (
@@ -19,8 +21,24 @@ from .models import (
     OpcodeInfo,
     AdjacencyEntry,
     PatchSpec,
-    FlipResult
+    FlipResult,
 )
+
+from .constants import (
+    ENV_OUTPUT_DIR,
+    ENV_PATCH_SPEC,
+    ENV_TARGET_SO,
+    ENV_TRITON_CACHE,
+    ENV_ALWAYS_COMPILE,
+    DEFAULT_TARGET_SO,
+    DEFAULT_MATCHER_TABLE,
+    DEFAULT_ADJACENCY,
+    DEFAULT_OUTPUT_DIR,
+    SYMBOL_SIZE_FALLBACK,
+    MAX_OPCODES,
+)
+
+from .subprocess_runner import run_subprocess
 
 __all__ = [
     "logger",
@@ -29,6 +47,7 @@ __all__ = [
     "LibraryNotFoundError",
     "CommitResolutionError",
     "LLVMProjectDownloadError",
+    "LLVMProjectBuildError",
     "ParserError",
 
     "TargetBackend",
@@ -39,5 +58,19 @@ __all__ = [
     "OpcodeInfo",
     "AdjacencyEntry",
     "PatchSpec",
-    "FlipResult"
+    "FlipResult",
+
+    "ENV_OUTPUT_DIR",
+    "ENV_PATCH_SPEC",
+    "ENV_TARGET_SO",
+    "ENV_TRITON_CACHE",
+    "ENV_ALWAYS_COMPILE",
+    "DEFAULT_TARGET_SO",
+    "DEFAULT_MATCHER_TABLE",
+    "DEFAULT_ADJACENCY",
+    "DEFAULT_OUTPUT_DIR",
+    "SYMBOL_SIZE_FALLBACK",
+    "MAX_OPCODES",
+
+    "run_subprocess",
 ]
