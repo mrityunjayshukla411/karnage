@@ -21,3 +21,9 @@ class LLVMProjectBuildError(KarnageError):
 
 class ParserError(KarnageError):
     """Error occured while parsing files related to matcher table"""
+
+class InjectorError(KarnageError):
+    """Base error for the injector module."""
+
+class MatcherTableLoadError(InjectorError):
+    """matcher_table.json could not be loaded or has an unexpected schema."""

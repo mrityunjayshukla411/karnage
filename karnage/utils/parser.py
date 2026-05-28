@@ -16,6 +16,10 @@ from karnage.utils.targets import TargetBackend
 
 _nm_cache: dict[str, list[tuple[int, int, str, str]]] = {}
 
+# Cached readelf -S --wide output keyed by binary path.
+# Section headers never change for a given binary; no need to re-run.
+_readelf_cache: dict[str, str] = {}
+
 
 def _nm_symbols(binary: Path) -> list[tuple[int, int, str, str]]:
     """
@@ -106,19 +110,19 @@ def estimate_symbol_byte_size(binary: Path, demangled_name: str) -> int:
     )
 
 
-def _find_rodata_symbol_vma(binary: Path, pattern: str) -> int:
+def _find_rodata_symbol(binary: Path, pattern: str) -> tuple[int, int]:
     """
-    Find the linker VMA of a read-only data symbol (nm type R/r) by
-    regex pattern against the demangled name.
+    Find the linker VMA and ELF size of a read-only data symbol (nm type R/r)
+    by regex pattern against the demangled name.
 
-    Reuses the cached nm output — no extra subprocess.
+    Returns (vma, size).  Reuses the cached nm output — no extra subprocess.
     """
     pat = re.compile(pattern)
-    for vma, _size, sym_type, name in _nm_symbols(binary):
+    for vma, size, sym_type, name in _nm_symbols(binary):
         if sym_type not in ('R', 'r'):
             continue
         if pat.search(name):
-            return vma
+            return vma, size
 
     raise ParserError(
         f"Read-only data symbol not found (pattern={pattern!r})",
@@ -136,16 +140,19 @@ def linker_vma_to_file_offset(binary: Path, section: str, vma: int) -> int:
 
         file_offset = (vma - section.sh_addr) + section.sh_offset
     """
-    try:
-        result = subprocess.run(
-            ["readelf", "-S", "--wide", str(binary)],
-            capture_output=True, text=True, check=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        raise ParserError(
-            f"readelf failed on {binary}",
-            context={"binary": str(binary), "stderr": exc.stderr},
-        ) from exc
+    key = str(binary)
+    if key not in _readelf_cache:
+        try:
+            result = subprocess.run(
+                ["readelf", "-S", "--wide", str(binary)],
+                capture_output=True, text=True, check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise ParserError(
+                f"readelf failed on {binary}",
+                context={"binary": str(binary), "stderr": exc.stderr},
+            ) from exc
+        _readelf_cache[key] = result.stdout
 
     # Match lines like:
     #   [  5] .rodata           PROGBITS  0000000001234567  00123456
@@ -155,7 +162,7 @@ def linker_vma_to_file_offset(binary: Path, section: str, vma: int) -> int:
         r'\[\s*\d+\]\s+' + re.escape(section) + r'\s+\S+\s+([0-9a-f]+)\s+([0-9a-f]+)',
         re.IGNORECASE,
     )
-    for line in result.stdout.splitlines():
+    for line in _readelf_cache[key].splitlines():
         m = pat.search(line)
         if m:
             section_vma  = int(m.group(1), 16)
@@ -200,50 +207,15 @@ def parse_opcode_enum(seldagisell_h_path: Path) -> dict[str, int]:
     return {name: idx for idx, name in enumerate(names)}
 
 
-def parse_morph_variants(seldagisell_h_path: Path) -> dict[int, tuple[int, bool]]:
-    """
-    Parse the BuiltinOpcodes enum and return the MorphNodeTo variant map.
-
-    Returns {enum_value: (n_results, has_explicit_flags_byte)} for every
-    OPC_MorphNodeTo* entry.
-
-    has_explicit_flags_byte is True only for the three "bare" variants
-    (OPC_MorphNodeTo0/1/2) whose bytecode includes an explicit EmitNodeInfo
-    flags byte between TARGET_OPC and the result-VT bytes.  All space-
-    optimized variants (*None, *Chain, *GlueInput, *GlueOutput) imply their
-    flags from the opcode itself and have no extra byte.
-
-    Raises ParserError if the enum is not found or yields no MorphNodeTo entries.
-    """
-    enum_map = parse_opcode_enum(seldagisell_h_path)
-
-    result: dict[int, tuple[int, bool]] = {}
-    # Matches OPC_MorphNodeTo<digit>[None|Chain|GlueInput|GlueOutput|<empty>]
-    _pat = re.compile(r'OPC_MorphNodeTo(\d+)(None|Chain|GlueInput|GlueOutput)?$')
-    for name, val in enum_map.items():
-        m = _pat.fullmatch(name)
-        if not m:
-            continue
-        n_results  = int(m.group(1))
-        has_flags  = m.group(2) is None  # bare OPC_MorphNodeTo0/1/2 carry a flags byte
-        result[val] = (n_results, has_flags)
-
-    if not result:
-        raise ParserError(
-            "No OPC_MorphNodeTo[0-4][suffix] entries found in BuiltinOpcodes enum",
-            context={"path": str(seldagisell_h_path)},
-        )
-
-    return result
-
-
 def parse_mvt_map(gen_vt_path: Path) -> dict[int, str]:
     """
-    Parse GET_VT_ATTR macros from GenVT.inc and return {int_value: type_name}.
+    Parse GET_VT_ATTR macros from GenVT.inc and return {enum_value: type_name}.
 
-    Each macro line looks like:
-        GET_VT_ATTR(i1, 1, ...)
-    The second argument is the actual assigned integer in MVT::SimpleValueType.
+    The macro signature is:
+        GET_VT_ATTR(Ty, sz, Any, Int, FP, Vec, Sc, Tup, NF, NElem, EltTy)
+    where `sz` is size-in-bits for scalars and element-count for vectors —
+    NOT the enum value.  The MVT::SimpleValueType enum value is simply the
+    0-based ordinal of each entry in file order (Other=0, i1=1, i2=2, ...).
 
     Raises ParserError if no entries are found.
     """
@@ -255,36 +227,39 @@ def parse_mvt_map(gen_vt_path: Path) -> dict[int, str]:
             context={"path": str(gen_vt_path)},
         ) from exc
 
-    entries = re.findall(r'GET_VT_ATTR\((\w+),\s*(\d+),', text)
-    if not entries:
+    names = re.findall(r'GET_VT_ATTR\((\w+),', text)
+    if not names:
         raise ParserError(
             "No GET_VT_ATTR entries found in GenVT.inc",
             context={"path": str(gen_vt_path)},
         )
 
-    return {int(val): name for name, val in entries}
+    # MVT::SimpleValueType enum starts at 1: INVALID_SIMPLE_VALUE_TYPE = 0
+    # is hardcoded before the GET_VT_ATTR entries, so Other = 1, i1 = 2, ...
+    return {idx: name for idx, name in enumerate(names, start=1)}
 
 
 # ---------------------------------------------------------------------------
 # AsmWriter opcode→mnemonic map
 # ---------------------------------------------------------------------------
 
-def _detect_asmstrs_mask(data: bytes, opinfo0_foff: int, n_probe: int = 1000) -> int:
+def _detect_asmstrs_mask(data: bytes, opinfo0_foff: int, opinfo0_size: int) -> int:
     """
     Detect whether OpInfo0 uses a 16-bit or 17-bit AsmStrs index.
 
     LLVM ≤ 21 stores a 16-bit index (mask 0xFFFF).
     LLVM ≥ 22 stores a 17-bit index (mask 0x1FFFF).
 
-    If any probed entry has bit 16 set, the AsmStrs table exceeds 64 KB
-    and the 17-bit mask applies.
+    Probes the entire OpInfo0 symbol (opinfo0_size bytes) so targets with
+    more than 1000 opcodes don't miss a 17-bit index that appears late in
+    the table.
     """
-    for i in range(n_probe):
-        off = opinfo0_foff + i * 4
-        if off + 4 > len(data):
-            break
+    end = opinfo0_foff + opinfo0_size
+    off = opinfo0_foff
+    while off + 4 <= min(end, len(data)):
         if struct.unpack_from('<I', data, off)[0] & 0x10000:
             return 0x1FFFF
+        off += 4
     return 0xFFFF
 
 
@@ -311,14 +286,14 @@ def build_opcode_mnemonic_map(
         data = binary.read_bytes()
 
     base = target.opinfo_symbol_pattern
-    opinfo0_vma = _find_rodata_symbol_vma(binary, base + r".*::OpInfo0")
-    asmstrs_vma = _find_rodata_symbol_vma(binary, base + r".*::AsmStrs")
-    logger.debug(f"OpInfo0 VMA=0x{opinfo0_vma:x}  AsmStrs VMA=0x{asmstrs_vma:x}")
+    opinfo0_vma, opinfo0_size = _find_rodata_symbol(binary, base + r".*::OpInfo0")
+    asmstrs_vma, _            = _find_rodata_symbol(binary, base + r".*::AsmStrs")
+    logger.debug(f"OpInfo0 VMA=0x{opinfo0_vma:x}  size={opinfo0_size}  AsmStrs VMA=0x{asmstrs_vma:x}")
 
     opinfo0_foff = linker_vma_to_file_offset(binary, ".rodata", opinfo0_vma)
     asmstrs_foff = linker_vma_to_file_offset(binary, ".rodata", asmstrs_vma)
 
-    asmstrs_mask = _detect_asmstrs_mask(data, opinfo0_foff)
+    asmstrs_mask = _detect_asmstrs_mask(data, opinfo0_foff, opinfo0_size)
     logger.debug(f"AsmStrs mask=0x{asmstrs_mask:x}")
 
     result: dict[int, str] = {}

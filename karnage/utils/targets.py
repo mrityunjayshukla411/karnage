@@ -53,6 +53,17 @@ class TargetBackend(ABC):
         output.  Used by scanner/opcode_map.py to locate OpInfo0/AsmStrs.
         """
 
+    def filter_mvt_map(self, mvt_map: dict[int, str]) -> dict[int, str]:
+        """
+        Return a subset of mvt_map containing only the MVT types this backend
+        can legitimately use as SelectionDAG value types.
+
+        The default passes everything through.  Backends should override to
+        exclude scalable-vector or other-target-specific types whose integer
+        values can appear as coincidental false positives in the bytecode scan.
+        """
+        return mvt_map
+
 @dataclass(frozen=True)
 class NVPTXBackend(TargetBackend):
     """
@@ -64,6 +75,20 @@ class NVPTXBackend(TargetBackend):
     tablegen_targets: tuple[str, ...] = ("NVPTXCommonTableGen",)
     matchertable_symbol: str = "llvm::NVPTXDAGToDAGISel::SelectCode(llvm::SDNode*)::MatcherTable"
     opinfo_symbol_pattern: str = r"NVPTXInstPrinter.*getMnemonic"
+
+    def filter_mvt_map(self, mvt_map: dict[int, str]) -> dict[int, str]:
+        # PTX ISA types: scalars (i1/i8/i16/i32/i64, f16/bf16/f32/f64, i128
+        # for wide ops) and fixed-width vectors.  Excluded:
+        #   - Other-target prefixes (nxv/riscv/aarch64/arm/mips/x86/ppc*)
+        #   - Non-PTX LLVM scalars: i2 (no 2-bit int), f80 (x87), ppcf128,
+        #     f128 (quad-precision), i256/i512 (too wide for PTX registers)
+        _EXCLUDED_PREFIXES = ('nxv', 'riscv', 'aarch64', 'arm', 'mips', 'x86', 'ppc')
+        _EXCLUDED_EXACT    = frozenset({'i2', 'f80', 'f128', 'ppcf128', 'i256', 'i512'})
+        return {
+            k: v for k, v in mvt_map.items()
+            if v not in _EXCLUDED_EXACT
+            and not any(v.startswith(p) for p in _EXCLUDED_PREFIXES)
+        }
 
     def inc_paths(self, llvm_path: Path) -> dict[str, Path]:
         """
