@@ -34,39 +34,14 @@ from karnage.utils.logger import logger
 from karnage.utils.parser import find_symbol_linker_vma
 from karnage.utils.targets import NVPTXBackend
 
+from karnage.utils.models import (
+    PatchSpec,
+    FlipResult
+)
+
 _THIS_DIR   = Path(__file__).parent
 _GDB_SCRIPT = _THIS_DIR / "_gdb_script.py"
 _WRAPPER    = _THIS_DIR / "_wrapper.py"
-
-
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class PatchSpec:
-    """One bit-flip experiment derived from an adjacency.json entry."""
-    flip_id:    int
-    opcode_a:   int
-    mnemonic_a: str
-    opcode_b:   int
-    mnemonic_b: str
-    flip_byte:  str            # "opc_lo" or "opc_hi"
-    flip_bit:   int
-    flip_mask:  int
-    patch_vmas: tuple[int, ...]  # one VMA per pattern occurrence of opcode_a
-
-
-@dataclass
-class FlipResult:
-    spec:          PatchSpec
-    crashed:       bool   # GDB exited non-zero
-    script_ran:    bool   # _wrapper.py completed (written _done sentinel)
-    ptx_changed:   bool
-    tensor_names:  list[str]
-    tensors_match: dict[str, bool]   # name → torch.allclose result
-    max_abs_diffs: dict[str, float]  # name → max |baseline - flip|
-
 
 # ---------------------------------------------------------------------------
 # JSON helpers

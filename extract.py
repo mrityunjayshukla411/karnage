@@ -59,11 +59,11 @@ from karnage.builder.builder import (
     _extract_binary_hash,
     build_llvm,
 )
-from karnage.extractor.extractor import (
-    get_matchertable_bounds,
-    MatcherEntry,
-)
-from karnage.extractor.walker import walk
+from karnage.extractor.extractor import get_matchertable_bounds
+
+from karnage.utils.models import MatcherEntry
+
+from karnage.extractor.extractor import walk
 from karnage.utils.parser import (
     build_opcode_mnemonic_map,
     parse_opcode_enum,

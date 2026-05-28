@@ -14,34 +14,11 @@ from pathlib import Path
 
 from karnage.utils.exceptions import MatcherTableLoadError
 from karnage.utils.logger import logger
-
-
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class OpcodeInfo:
-    mnemonic:     str
-    opcode:       int
-    opc_lo:       int
-    opc_hi:       int
-    num_patterns: int
-
-
-@dataclass(frozen=True)
-class FlipInfo:
-    byte: str   # "opc_lo" or "opc_hi"
-    bit:  int   # bit position within that byte (0 = LSB)
-    mask: int   # 1 << bit
-
-
-@dataclass(frozen=True)
-class AdjacencyEntry:
-    a:    OpcodeInfo
-    b:    OpcodeInfo   # b.opcode > a.opcode (lower opcode always in a)
-    flip: FlipInfo
-
+from karnage.utils.models import (
+    OpcodeInfo,
+    FlipInfo,
+    AdjacencyEntry
+)
 
 # ---------------------------------------------------------------------------
 # Loading

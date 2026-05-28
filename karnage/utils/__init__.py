@@ -13,6 +13,15 @@ from .targets import (
     NVPTXBackend
 )
 
+from .models import (
+    MatcherEntry,
+    FlipInfo,
+    OpcodeInfo,
+    AdjacencyEntry,
+    PatchSpec,
+    FlipResult
+)
+
 __all__ = [
     "logger",
 
@@ -24,4 +33,11 @@ __all__ = [
 
     "TargetBackend",
     "NVPTXBackend",
+
+    "MatcherEntry",
+    "FlipInfo",
+    "OpcodeInfo",
+    "AdjacencyEntry",
+    "PatchSpec",
+    "FlipResult"
 ]
