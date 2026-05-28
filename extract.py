@@ -61,13 +61,11 @@ from karnage.builder.builder import (
 )
 from karnage.extractor.extractor import (
     get_matchertable_bounds,
-    build_switchtype_context,
-    scan,
     MatcherEntry,
 )
+from karnage.extractor.walker import walk
 from karnage.utils.parser import (
     build_opcode_mnemonic_map,
-    parse_morph_variants,
     parse_opcode_enum,
     parse_mvt_map,
 )
@@ -119,19 +117,14 @@ def extract(library: Path, output: Path) -> None:
 
     opc_map  = build_opcode_mnemonic_map(library, target, data=data)
     mt_off, mt_size = get_matchertable_bounds(library, target)
-    morph    = parse_morph_variants(inc["seldagisell_h"])
     mvt      = parse_mvt_map(inc["genvt"])
+    # Restrict to types valid for this target; removes scalable / other-target
+    # types from the global MVT enum that corrupt false-positive SwitchType arms.
+    mvt_filtered = target.filter_mvt_map(mvt)
 
-    full_enum       = parse_opcode_enum(inc["seldagisell_h"])
-    switch_type_opc = full_enum.get("OPC_SwitchType")
+    full_enum = parse_opcode_enum(inc["seldagisell_h"])
 
-    st_context: dict = {}
-    if switch_type_opc is not None:
-        st_context = build_switchtype_context(data, mt_off, mt_size, switch_type_opc, mvt)
-    else:
-        logger.warning("OPC_SwitchType not found in BuiltinOpcodes — input_mvt will use fallback")
-
-    entries = scan(data, mt_off, mt_size, morph, opc_map, mvt, switchtype_context=st_context)
+    entries = walk(data, mt_off, mt_size, full_enum, opc_map, mvt_filtered)
 
     # Reverse map: morph byte value → OPC_MorphNodeTo* name string
     morph_name_map: dict[int, str] = {v: k for k, v in full_enum.items() if "MorphNodeTo" in k}
@@ -170,7 +163,7 @@ def extract(library: Path, output: Path) -> None:
     with output.open("w") as f:
         json.dump(doc, f, indent=2)
 
-    logger.info(
+    logger.success(
         f"Wrote {len(entries):,} patterns across {len(instructions):,} mnemonics → {output}"
     )
 
