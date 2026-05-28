@@ -41,7 +41,7 @@ Output layout (per flip):
 import argparse
 from pathlib import Path
 
-from karnage.tester import run_tester
+from karnage.injector import run_tester
 
 
 def main() -> None:

@@ -46,7 +46,7 @@ Output shape:
 import argparse
 from pathlib import Path
 
-from karnage.injector import run
+from karnage.extractor.extractor import run
 
 
 def main() -> None:

@@ -1,19 +1,3 @@
-from .injector import (
-    OpcodeInfo,
-    FlipInfo,
-    AdjacencyEntry,
-    load_matcher_table,
-    find_adjacent_pairs,
-    build_report,
-    run,
-)
+from .runner import run_tester, FlipResult, PatchSpec
 
-__all__ = [
-    "OpcodeInfo",
-    "FlipInfo",
-    "AdjacencyEntry",
-    "load_matcher_table",
-    "find_adjacent_pairs",
-    "build_report",
-    "run",
-]
+__all__ = ["run_tester", "FlipResult", "PatchSpec"]
