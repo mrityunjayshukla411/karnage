@@ -15,6 +15,11 @@ current working directory.  Subsequent calls with the same commit hash skip
 the download and build steps entirely.
 """
 
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
 from karnage.utils.exceptions import (
     CommitResolutionError,
     LibraryNotFoundError,
@@ -23,17 +28,9 @@ from karnage.utils.exceptions import (
 )
 from karnage.utils.logger import logger
 from karnage.utils.subprocess_runner import run_subprocess
-from karnage.utils.targets import TargetBackend, NVPTXBackend
+from karnage.utils.targets import TargetBackend
 
-import re
-import shutil
-import subprocess
-from pathlib import Path
-
-
-_LLVM_VERSION_RE = re.compile(
-    r"LLVM version \d+\.\d+\.[^ ]+\s+\(([0-9a-fA-F]{40})\)"
-)
+_LLVM_VERSION_RE = re.compile(r"LLVM version \d+\.\d+\.[^ ]+\s+\(([0-9a-fA-F]{40})\)")
 
 
 def _cache_root() -> Path:
@@ -160,8 +157,8 @@ def _download_archive(url: str, dest_dir: Path) -> None:
 
 
 def build_llvm(
-    commit_hash:   str,
-    target:        TargetBackend,
+    commit_hash: str,
+    target: TargetBackend,
     force_rebuild: bool = False,
 ) -> Path:
     """Download and build the LLVM tablegen targets for a specific commit.
@@ -197,7 +194,7 @@ def build_llvm(
             target fails.
     """
     llvm_cache_dir = _cache_root() / f"llvm-{commit_hash}"
-    repo_dir  = llvm_cache_dir / "repo"
+    repo_dir = llvm_cache_dir / "repo"
     build_dir = llvm_cache_dir / "build"
 
     def _is_cache_valid() -> bool:
@@ -226,7 +223,9 @@ def build_llvm(
 
         logger.info("Extracting LLVM archive")
         try:
-            run_subprocess(["unzip", "-q", archive_name], cwd=llvm_cache_dir, timeout=300)
+            run_subprocess(
+                ["unzip", "-q", archive_name], cwd=llvm_cache_dir, timeout=300
+            )
         except subprocess.CalledProcessError as exc:
             raise LLVMProjectDownloadError(
                 "Failed to extract LLVM source archive",
@@ -246,8 +245,10 @@ def build_llvm(
             run_subprocess(
                 [
                     "cmake",
-                    "-S", str(repo_dir / "llvm"),
-                    "-B", str(build_dir),
+                    "-S",
+                    str(repo_dir / "llvm"),
+                    "-B",
+                    str(build_dir),
                     "-DCMAKE_BUILD_TYPE=Release",
                     f"-DLLVM_TARGETS_TO_BUILD={target.cmake_target_name}",
                     "-DLLVM_ENABLE_PROJECTS=",

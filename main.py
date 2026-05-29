@@ -23,8 +23,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from karnage.builder.builder import (
-    _get_target_library_path,
     _extract_binary_hash,
+    _get_target_library_path,
     build_llvm,
 )
 from karnage.extractor.extractor import get_matchertable_bounds, run, walk
@@ -43,10 +43,10 @@ from karnage.utils.parser import (
 )
 from karnage.utils.targets import NVPTXBackend
 
-
 # ---------------------------------------------------------------------------
 # Shared serialisation helper
 # ---------------------------------------------------------------------------
+
 
 def _build_pattern(e: MatcherEntry, morph_name_map: dict[int, str]) -> dict:
     """Serialise one :class:`~karnage.utils.models.MatcherEntry` as a JSON pattern object.
@@ -61,9 +61,9 @@ def _build_pattern(e: MatcherEntry, morph_name_map: dict[int, str]) -> dict:
         ``matcher_table.json``.
     """
     return {
-        "hit_num":   e.hit_num,
+        "hit_num": e.hit_num,
         "input_mvt": {
-            "hex":  f"0x{e.input_mvt:02x}",
+            "hex": f"0x{e.input_mvt:02x}",
             "type": e.input_mvt_type,
         },
         "results": [
@@ -71,20 +71,20 @@ def _build_pattern(e: MatcherEntry, morph_name_map: dict[int, str]) -> dict:
             for mvt, typ in zip(e.result_mvts, e.result_mvt_types)
         ],
         "n_results": e.n_results,
-        "num_ops":   e.num_ops,
-        "op_idx":    e.op_idx,
-        "arm_len":   e.arm_len,
+        "num_ops": e.num_ops,
+        "op_idx": e.op_idx,
+        "arm_len": e.arm_len,
         "location": {
             "file_offset": f"0x{e.file_offset:08x}",
-            "mt_offset":   f"0x{e.mt_offset:08x}",
+            "mt_offset": f"0x{e.mt_offset:08x}",
         },
         "encoding": {
             "morph_variant": morph_name_map.get(e.morph_byte, f"0x{e.morph_byte:02x}"),
-            "morph_byte":    f"0x{e.morph_byte:02x}",
-            "flags_byte":    f"0x{e.flags_byte:02x}",
-            "opc_lo":        f"0x{e.opc_lo:02x}",
-            "opc_hi":        f"0x{e.opc_hi:02x}",
-            "raw_bytes":     e.raw_bytes.hex(" "),
+            "morph_byte": f"0x{e.morph_byte:02x}",
+            "flags_byte": f"0x{e.flags_byte:02x}",
+            "opc_lo": f"0x{e.opc_lo:02x}",
+            "opc_hi": f"0x{e.opc_hi:02x}",
+            "raw_bytes": e.raw_bytes.hex(" "),
         },
     }
 
@@ -92,6 +92,7 @@ def _build_pattern(e: MatcherEntry, morph_name_map: dict[int, str]) -> dict:
 # ---------------------------------------------------------------------------
 # extract
 # ---------------------------------------------------------------------------
+
 
 def _cmd_extract(args: argparse.Namespace) -> None:
     """Extract the MatcherTable then build the adjacency table in one pass.
@@ -120,11 +121,11 @@ def _cmd_extract(args: argparse.Namespace) -> None:
 
     data = library.read_bytes()
 
-    opc_map         = build_opcode_mnemonic_map(library, target, data=data)
+    opc_map = build_opcode_mnemonic_map(library, target, data=data)
     mt_off, mt_size = get_matchertable_bounds(library, target)
-    mvt             = parse_mvt_map(inc["genvt"])
-    mvt_filtered    = target.filter_mvt_map(mvt)
-    full_enum       = parse_opcode_enum(inc["seldagisell_h"])
+    mvt = parse_mvt_map(inc["genvt"])
+    mvt_filtered = target.filter_mvt_map(mvt)
+    full_enum = parse_opcode_enum(inc["seldagisell_h"])
 
     entries = walk(data, mt_off, mt_size, full_enum, opc_map, mvt_filtered)
 
@@ -142,21 +143,23 @@ def _cmd_extract(args: argparse.Namespace) -> None:
     for mnemonic in sorted(grouped):
         opcode_objects = []
         for opcode in sorted(grouped[mnemonic]):
-            opcode_objects.append({
-                "opcode":   opcode,
-                "patterns": [
-                    _build_pattern(e, morph_name_map)
-                    for e in grouped[mnemonic][opcode]
-                ],
-            })
+            opcode_objects.append(
+                {
+                    "opcode": opcode,
+                    "patterns": [
+                        _build_pattern(e, morph_name_map)
+                        for e in grouped[mnemonic][opcode]
+                    ],
+                }
+            )
         instructions[mnemonic] = opcode_objects
 
     doc = {
         "meta": {
-            "llvm_commit":          commit_hash,
-            "binary":               str(library),
-            "total_patterns":       len(entries),
-            "total_mnemonics":      len(instructions),
+            "llvm_commit": commit_hash,
+            "binary": str(library),
+            "total_patterns": len(entries),
+            "total_mnemonics": len(instructions),
             "total_opcode_objects": sum(len(v) for v in instructions.values()),
         },
         "instructions": instructions,
@@ -178,6 +181,7 @@ def _cmd_extract(args: argparse.Namespace) -> None:
 # inject
 # ---------------------------------------------------------------------------
 
+
 def _cmd_inject(args: argparse.Namespace) -> None:
     """Validate inputs and run the GDB-based bit-flip test suite.
 
@@ -185,37 +189,39 @@ def _cmd_inject(args: argparse.Namespace) -> None:
         args: Parsed CLI arguments for the ``inject`` subcommand.
     """
     for path, flag in [
-        (args.script,        "--script"),
+        (args.script, "--script"),
         (args.matcher_table, "--matcher-table"),
-        (args.adjacency,     "--adjacency"),
-        (args.library,       "--library"),
+        (args.adjacency, "--adjacency"),
+        (args.library, "--library"),
     ]:
         if not path.exists():
             raise SystemExit(f"{flag}: not found: {path}")
 
     target_mnemonics = (
         frozenset(m.strip() for m in args.mnemonics.split(",") if m.strip())
-        if args.mnemonics else None
+        if args.mnemonics
+        else None
     )
 
     run_flipper(
-        triton_script      = args.script,
-        matcher_table_json = args.matcher_table,
-        adjacency_json     = args.adjacency,
-        libtriton_so       = args.library,
-        output_dir         = args.output,
-        max_flips          = args.max_flips,
-        report_json        = args.report,
-        cooldown_every     = args.cooldown_every,
-        cooldown_secs      = args.cooldown_secs,
-        filter_by_ptx      = args.filter_by_ptx,
-        target_mnemonics   = target_mnemonics,
+        triton_script=args.script,
+        matcher_table_json=args.matcher_table,
+        adjacency_json=args.adjacency,
+        libtriton_so=args.library,
+        output_dir=args.output,
+        max_flips=args.max_flips,
+        report_json=args.report,
+        cooldown_every=args.cooldown_every,
+        cooldown_secs=args.cooldown_secs,
+        filter_by_ptx=args.filter_by_ptx,
+        target_mnemonics=target_mnemonics,
     )
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def _build_parser() -> argparse.ArgumentParser:
     """Construct and return the top-level argument parser with all subcommands."""
@@ -238,20 +244,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     src = p_extract.add_mutually_exclusive_group(required=True)
     src.add_argument(
-        "--library", type=Path,
+        "--library",
+        type=Path,
         help="Explicit path to libtriton.so",
     )
     src.add_argument(
-        "--from-triton", action="store_true",
+        "--from-triton",
+        action="store_true",
         help="Auto-detect libtriton.so from the installed triton package",
     )
     p_extract.add_argument(
-        "--matcher-table", type=Path, default=Path(DEFAULT_MATCHER_TABLE),
+        "--matcher-table",
+        type=Path,
+        default=Path(DEFAULT_MATCHER_TABLE),
         metavar="PATH",
         help=f"Output path for the MatcherTable JSON (default: {DEFAULT_MATCHER_TABLE})",
     )
     p_extract.add_argument(
-        "--adjacency", type=Path, default=Path(DEFAULT_ADJACENCY),
+        "--adjacency",
+        type=Path,
+        default=Path(DEFAULT_ADJACENCY),
         metavar="PATH",
         help=f"Output path for the adjacency JSON (default: {DEFAULT_ADJACENCY})",
     )
@@ -268,50 +280,76 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_inject.add_argument(
-        "--script", type=Path, required=True,
+        "--script",
+        type=Path,
+        required=True,
         help="Triton application script to test (e.g. matmul.py)",
     )
     p_inject.add_argument(
-        "--matcher-table", type=Path, default=Path(DEFAULT_MATCHER_TABLE),
+        "--matcher-table",
+        type=Path,
+        default=Path(DEFAULT_MATCHER_TABLE),
         metavar="PATH",
         help=f"matcher_table.json from extract (default: {DEFAULT_MATCHER_TABLE})",
     )
     p_inject.add_argument(
-        "--adjacency", type=Path, default=Path(DEFAULT_ADJACENCY),
+        "--adjacency",
+        type=Path,
+        default=Path(DEFAULT_ADJACENCY),
         metavar="PATH",
         help=f"adjacency.json from extract (default: {DEFAULT_ADJACENCY})",
     )
     p_inject.add_argument(
-        "--library", type=Path, required=True,
+        "--library",
+        type=Path,
+        required=True,
         help="Path to libtriton.so",
     )
     p_inject.add_argument(
-        "--output", type=Path, default=Path(DEFAULT_OUTPUT_DIR),
+        "--output",
+        type=Path,
+        default=Path(DEFAULT_OUTPUT_DIR),
         metavar="DIR",
         help=f"Root output directory for per-flip results (default: {DEFAULT_OUTPUT_DIR})",
     )
     p_inject.add_argument(
-        "--max-flips", type=int, default=None, metavar="N",
+        "--max-flips",
+        type=int,
+        default=None,
+        metavar="N",
         help="Stop after N flips (useful for a quick sanity check)",
     )
     p_inject.add_argument(
-        "--report", type=Path, default=None, metavar="PATH",
+        "--report",
+        type=Path,
+        default=None,
+        metavar="PATH",
         help="Write a JSON summary of all flip results to this path",
     )
     p_inject.add_argument(
-        "--cooldown-every", type=int, default=0, metavar="N",
+        "--cooldown-every",
+        type=int,
+        default=0,
+        metavar="N",
         help="Pause for --cooldown-secs after every N flips (0 = disabled)",
     )
     p_inject.add_argument(
-        "--cooldown-secs", type=float, default=30.0, metavar="S",
+        "--cooldown-secs",
+        type=float,
+        default=30.0,
+        metavar="S",
         help="Seconds to sleep during each cooldown pause (default: 30)",
     )
     p_inject.add_argument(
-        "--filter-by-ptx", action="store_true",
+        "--filter-by-ptx",
+        action="store_true",
         help="Only test opcodes whose mnemonic appears in the baseline PTX",
     )
     p_inject.add_argument(
-        "--mnemonics", type=str, default=None, metavar="m1,m2,...",
+        "--mnemonics",
+        type=str,
+        default=None,
+        metavar="m1,m2,...",
         help="Comma-separated list of mnemonics to test exclusively",
     )
     p_inject.set_defaults(func=_cmd_inject)

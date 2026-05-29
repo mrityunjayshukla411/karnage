@@ -22,16 +22,16 @@ the intent explicit and allows targeted overrides in tests.
 # Environment variable names
 # ---------------------------------------------------------------------------
 
-ENV_OUTPUT_DIR     = "KARNAGE_OUTPUT_DIR"
+ENV_OUTPUT_DIR = "KARNAGE_OUTPUT_DIR"
 """Directory where ``_wrapper.py`` writes per-tensor ``.pt`` files."""
 
-ENV_PATCH_SPEC     = "KARNAGE_PATCH_SPEC"
+ENV_PATCH_SPEC = "KARNAGE_PATCH_SPEC"
 """Path to the ``patch_spec.json`` consumed by ``_gdb_script.py``."""
 
-ENV_TARGET_SO      = "KARNAGE_TARGET_SO"
+ENV_TARGET_SO = "KARNAGE_TARGET_SO"
 """Substring matched against loaded objfile names in ``_gdb_script.py``."""
 
-ENV_TRITON_CACHE   = "TRITON_CACHE_DIR"
+ENV_TRITON_CACHE = "TRITON_CACHE_DIR"
 """Directory where Triton writes compiled PTX; set by ``runner.py``."""
 
 ENV_ALWAYS_COMPILE = "TRITON_ALWAYS_COMPILE"
@@ -41,16 +41,16 @@ ENV_ALWAYS_COMPILE = "TRITON_ALWAYS_COMPILE"
 # Default names / paths used by the CLI
 # ---------------------------------------------------------------------------
 
-DEFAULT_TARGET_SO     = "libtriton.so"
+DEFAULT_TARGET_SO = "libtriton.so"
 """Default shared-library name matched by ``_gdb_script.py``."""
 
 DEFAULT_MATCHER_TABLE = "matcher_table.json"
 """Default output path for the ``extract`` subcommand."""
 
-DEFAULT_ADJACENCY     = "adjacency.json"
+DEFAULT_ADJACENCY = "adjacency.json"
 """Default output path for the ``inject`` subcommand."""
 
-DEFAULT_OUTPUT_DIR    = "test_results"
+DEFAULT_OUTPUT_DIR = "test_results"
 """Default root output directory for the ``test`` subcommand."""
 
 # ---------------------------------------------------------------------------

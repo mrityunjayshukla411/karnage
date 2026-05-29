@@ -42,24 +42,24 @@ class MatcherEntry:
         raw_bytes:        Raw bytes of the pattern arm as captured from the binary.
     """
 
-    opcode:           int
-    mnemonic:         str
-    hit_num:          int
-    n_results:        int
-    morph_byte:       int
-    flags_byte:       int
-    opc_lo:           int
-    opc_hi:           int
-    file_offset:      int
-    mt_offset:        int
-    arm_len:          int
-    input_mvt:        int
-    input_mvt_type:   str
-    result_mvts:      tuple[int, ...]
+    opcode: int
+    mnemonic: str
+    hit_num: int
+    n_results: int
+    morph_byte: int
+    flags_byte: int
+    opc_lo: int
+    opc_hi: int
+    file_offset: int
+    mt_offset: int
+    arm_len: int
+    input_mvt: int
+    input_mvt_type: str
+    result_mvts: tuple[int, ...]
     result_mvt_types: tuple[str, ...]
-    num_ops:          int
-    op_idx:           int
-    raw_bytes:        bytes
+    num_ops: int
+    op_idx: int
+    raw_bytes: bytes
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ class FlipInfo:
     """
 
     byte: str
-    bit:  int
+    bit: int
     mask: int
 
 
@@ -89,10 +89,10 @@ class OpcodeInfo:
         num_patterns: Number of MatcherTable pattern arms for this opcode.
     """
 
-    mnemonic:     str
-    opcode:       int
-    opc_lo:       int
-    opc_hi:       int
+    mnemonic: str
+    opcode: int
+    opc_lo: int
+    opc_hi: int
     num_patterns: int
 
 
@@ -108,8 +108,8 @@ class AdjacencyEntry:
         flip: Which byte and bit position separate the two encodings.
     """
 
-    a:    OpcodeInfo
-    b:    OpcodeInfo
+    a: OpcodeInfo
+    b: OpcodeInfo
     flip: FlipInfo
 
 
@@ -130,14 +130,14 @@ class PatchSpec:
                     ``opcode_a``; one entry per pattern occurrence.
     """
 
-    flip_id:    int
-    opcode_a:   int
+    flip_id: int
+    opcode_a: int
     mnemonic_a: str
-    opcode_b:   int
+    opcode_b: int
     mnemonic_b: str
-    flip_byte:  str
-    flip_bit:   int
-    flip_mask:  int
+    flip_byte: str
+    flip_bit: int
+    flip_mask: int
     patch_vmas: tuple[int, ...]
 
 
@@ -158,10 +158,10 @@ class FlipResult:
         max_abs_diffs: Per-tensor maximum absolute difference from the baseline.
     """
 
-    spec:          PatchSpec
-    crashed:       bool
-    script_ran:    bool
-    ptx_changed:   bool
-    tensor_names:  list[str]
+    spec: PatchSpec
+    crashed: bool
+    script_ran: bool
+    ptx_changed: bool
+    tensor_names: list[str]
     tensors_match: dict[str, bool]
     max_abs_diffs: dict[str, float]

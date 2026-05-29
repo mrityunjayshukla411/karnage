@@ -52,7 +52,9 @@ def run_subprocess(
             does not finish in time.
         FileNotFoundError:             If the executable is not found on PATH.
     """
-    from karnage.utils.logger import logger  # local import avoids circular dep at module load
+    from karnage.utils.logger import (
+        logger,  # local import avoids circular dep at module load
+    )
 
     str_cmd = [str(c) for c in cmd]
     logger.debug(f"$ {' '.join(str_cmd)}")

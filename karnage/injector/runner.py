@@ -26,7 +26,6 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -42,14 +41,15 @@ from karnage.utils.models import FlipResult, PatchSpec
 from karnage.utils.parser import find_symbol_linker_vma
 from karnage.utils.targets import NVPTXBackend
 
-_THIS_DIR   = Path(__file__).parent
+_THIS_DIR = Path(__file__).parent
 _GDB_SCRIPT = _THIS_DIR / "_gdb_script.py"
-_WRAPPER    = _THIS_DIR / "_wrapper.py"
+_WRAPPER = _THIS_DIR / "_wrapper.py"
 
 
 # ---------------------------------------------------------------------------
 # JSON helpers
 # ---------------------------------------------------------------------------
+
 
 def _load_json(path: Path) -> dict:
     """Load a JSON file, raising a domain error if it is missing.
@@ -90,19 +90,18 @@ def _build_patch_map(mt_data: dict) -> dict[int, list[int]]:
     result: dict[int, list[int]] = {}
     for _, opc_list in mt_data["instructions"].items():
         for opc_obj in opc_list:
-            opcode     = opc_obj["opcode"]
+            opcode = opc_obj["opcode"]
             mt_offsets = [
-                int(pat["location"]["mt_offset"], 16)
-                for pat in opc_obj["patterns"]
+                int(pat["location"]["mt_offset"], 16) for pat in opc_obj["patterns"]
             ]
             result[opcode] = mt_offsets
     return result
 
 
 def _iter_patch_specs(
-    adj_data:  dict,
+    adj_data: dict,
     patch_map: dict[int, list[int]],
-    mt_vma:    int,
+    mt_vma: int,
 ) -> Iterator[PatchSpec]:
     """Yield one :class:`~karnage.utils.models.PatchSpec` per adjacent pair.
 
@@ -121,7 +120,7 @@ def _iter_patch_specs(
     """
     flip_id = 0
     for opcode_str, instr in adj_data["instructions"].items():
-        opcode_a   = int(opcode_str)
+        opcode_a = int(opcode_str)
         mt_offsets = patch_map.get(opcode_a)
         if not mt_offsets:
             logger.warning(
@@ -131,21 +130,21 @@ def _iter_patch_specs(
             continue
 
         for neighbor in instr["adjacent"]:
-            flip       = neighbor["flip"]
+            flip = neighbor["flip"]
             byte_index = 1 if flip["byte"] == "opc_lo" else 2
-            mask       = int(flip["mask"], 16)
+            mask = int(flip["mask"], 16)
             patch_vmas = tuple(mt_vma + off + byte_index for off in mt_offsets)
 
             yield PatchSpec(
-                flip_id    = flip_id,
-                opcode_a   = opcode_a,
-                mnemonic_a = instr["mnemonic"],
-                opcode_b   = neighbor["opcode"],
-                mnemonic_b = neighbor["mnemonic"],
-                flip_byte  = flip["byte"],
-                flip_bit   = flip["bit"],
-                flip_mask  = mask,
-                patch_vmas = patch_vmas,
+                flip_id=flip_id,
+                opcode_a=opcode_a,
+                mnemonic_a=instr["mnemonic"],
+                opcode_b=neighbor["opcode"],
+                mnemonic_b=neighbor["mnemonic"],
+                flip_byte=flip["byte"],
+                flip_bit=flip["bit"],
+                flip_mask=mask,
+                patch_vmas=patch_vmas,
             )
             flip_id += 1
 
@@ -154,9 +153,10 @@ def _iter_patch_specs(
 # Subprocess helpers
 # ---------------------------------------------------------------------------
 
+
 def _run_inferior(
-    triton_script:   Path,
-    output_dir:      Path,
+    triton_script: Path,
+    output_dir: Path,
     *,
     patch_spec_path: Path | None = None,
 ) -> bool:
@@ -183,8 +183,8 @@ def _run_inferior(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     env = {**os.environ}
-    env[ENV_OUTPUT_DIR]     = str(output_dir / "tensors")
-    env[ENV_TRITON_CACHE]   = str(output_dir / "triton_cache")
+    env[ENV_OUTPUT_DIR] = str(output_dir / "tensors")
+    env[ENV_TRITON_CACHE] = str(output_dir / "triton_cache")
     env[ENV_ALWAYS_COMPILE] = "1"
 
     if patch_spec_path is None:
@@ -192,9 +192,15 @@ def _run_inferior(
     else:
         env[ENV_PATCH_SPEC] = str(patch_spec_path)
         cmd = [
-            "gdb", "--batch", "-q",
-            "-x", str(_GDB_SCRIPT),
-            "--args", sys.executable, str(_WRAPPER), str(triton_script),
+            "gdb",
+            "--batch",
+            "-q",
+            "-x",
+            str(_GDB_SCRIPT),
+            "--args",
+            sys.executable,
+            str(_WRAPPER),
+            str(triton_script),
         ]
 
     try:
@@ -213,6 +219,7 @@ def _run_inferior(
 # ---------------------------------------------------------------------------
 # PTX collection
 # ---------------------------------------------------------------------------
+
 
 def _collect_ptx(output_dir: Path) -> list[str]:
     """Return the contents of all ``.ptx`` files under ``triton_cache/``.
@@ -242,8 +249,8 @@ def _collect_ptx(output_dir: Path) -> list[str]:
 #   "  @%p0 bra $L__BB0_2;"             → "bra"
 _PTX_INSTR_RE = re.compile(
     r"^\s*"
-    r"(?:@[!%\w]+\s+)?"                           # optional predicate
-    r"([a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*)\b"   # mnemonic (dot-separated tokens)
+    r"(?:@[!%\w]+\s+)?"  # optional predicate
+    r"([a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*)\b"  # mnemonic (dot-separated tokens)
 )
 _PTX_SKIP_CHARS = frozenset({".", "/", "$", "{", "}", "@"})
 
@@ -274,9 +281,9 @@ def extract_ptx_mnemonics(baseline_dir: Path) -> frozenset[str]:
 
 
 def _apply_filters(
-    specs:            list[PatchSpec],
+    specs: list[PatchSpec],
     *,
-    ptx_mnemonics:    frozenset[str] | None,
+    ptx_mnemonics: frozenset[str] | None,
     target_mnemonics: frozenset[str] | None,
 ) -> list[PatchSpec]:
     """Return a filtered copy of *specs* with irrelevant flips removed.
@@ -323,10 +330,11 @@ def _apply_filters(
 # Result comparison
 # ---------------------------------------------------------------------------
 
+
 def _compare(
-    spec:         PatchSpec,
+    spec: PatchSpec,
     baseline_dir: Path,
-    flip_dir:     Path,
+    flip_dir: Path,
 ) -> FlipResult:
     """Compare a flip run against the baseline and return a :class:`~karnage.utils.models.FlipResult`.
 
@@ -349,39 +357,38 @@ def _compare(
     """
     import torch
 
-    rc_file        = flip_dir / "returncode.txt"
+    rc_file = flip_dir / "returncode.txt"
     error_sentinel = flip_dir / "tensors" / "_error.txt"
-    done_sentinel  = flip_dir / "tensors" / "_done"
-    gdb_failed     = (
-        not rc_file.exists()
-        or int(rc_file.read_text().strip() or "1") != 0
-    )
+    done_sentinel = flip_dir / "tensors" / "_done"
+    gdb_failed = not rc_file.exists() or int(rc_file.read_text().strip() or "1") != 0
     script_ran = done_sentinel.exists() and not error_sentinel.exists()
-    crashed    = gdb_failed or not script_ran
+    crashed = gdb_failed or not script_ran
 
     baseline_ptx = _collect_ptx(baseline_dir)
-    flip_ptx     = _collect_ptx(flip_dir)
-    ptx_changed  = bool(baseline_ptx) and bool(flip_ptx) and baseline_ptx != flip_ptx
+    flip_ptx = _collect_ptx(flip_dir)
+    ptx_changed = bool(baseline_ptx) and bool(flip_ptx) and baseline_ptx != flip_ptx
 
-    tensors_match: dict[str, bool]  = {}
+    tensors_match: dict[str, bool] = {}
     max_abs_diffs: dict[str, float] = {}
-    tensor_names:  list[str]        = []
+    tensor_names: list[str] = []
 
     if not crashed:
         b_dir = baseline_dir / "tensors"
         f_dir = flip_dir / "tensors"
         if b_dir.exists() and f_dir.exists():
             for pt_file in sorted(b_dir.glob("*.pt")):
-                name      = pt_file.stem
+                name = pt_file.stem
                 flip_file = f_dir / pt_file.name
                 if not flip_file.exists():
                     continue
                 tensor_names.append(name)
                 try:
-                    a = torch.load(pt_file,  map_location="cpu")
+                    a = torch.load(pt_file, map_location="cpu")
                     b = torch.load(flip_file, map_location="cpu")
                     a, b = a.float(), b.float()
-                    tensors_match[name] = bool(torch.allclose(a, b, atol=1e-5, rtol=1e-5))
+                    tensors_match[name] = bool(
+                        torch.allclose(a, b, atol=1e-5, rtol=1e-5)
+                    )
                     max_abs_diffs[name] = float((a - b).abs().max())
                 except Exception as exc:
                     # torch.load can raise many unrelated exception types
@@ -391,19 +398,20 @@ def _compare(
                     logger.warning(f"  tensor compare failed for {name!r}: {exc}")
 
     return FlipResult(
-        spec          = spec,
-        crashed       = crashed,
-        script_ran    = script_ran,
-        ptx_changed   = ptx_changed,
-        tensor_names  = tensor_names,
-        tensors_match = tensors_match,
-        max_abs_diffs = max_abs_diffs,
+        spec=spec,
+        crashed=crashed,
+        script_ran=script_ran,
+        ptx_changed=ptx_changed,
+        tensor_names=tensor_names,
+        tensors_match=tensors_match,
+        max_abs_diffs=max_abs_diffs,
     )
 
 
 # ---------------------------------------------------------------------------
 # Report serialisation
 # ---------------------------------------------------------------------------
+
 
 def _serialise_result(r: FlipResult) -> dict:
     """Serialise a :class:`~karnage.utils.models.FlipResult` to a JSON-safe dict.
@@ -415,17 +423,17 @@ def _serialise_result(r: FlipResult) -> dict:
         Dict suitable for ``json.dump``.
     """
     return {
-        "flip_id":       r.spec.flip_id,
-        "opcode_a":      r.spec.opcode_a,
-        "mnemonic_a":    r.spec.mnemonic_a,
-        "opcode_b":      r.spec.opcode_b,
-        "mnemonic_b":    r.spec.mnemonic_b,
-        "flip_byte":     r.spec.flip_byte,
-        "flip_bit":      r.spec.flip_bit,
-        "crashed":       r.crashed,
-        "script_ran":    r.script_ran,
-        "ptx_changed":   r.ptx_changed,
-        "tensor_names":  r.tensor_names,
+        "flip_id": r.spec.flip_id,
+        "opcode_a": r.spec.opcode_a,
+        "mnemonic_a": r.spec.mnemonic_a,
+        "opcode_b": r.spec.opcode_b,
+        "mnemonic_b": r.spec.mnemonic_b,
+        "flip_byte": r.spec.flip_byte,
+        "flip_bit": r.spec.flip_bit,
+        "crashed": r.crashed,
+        "script_ran": r.script_ran,
+        "ptx_changed": r.ptx_changed,
+        "tensor_names": r.tensor_names,
         "tensors_match": r.tensors_match,
         "max_abs_diffs": r.max_abs_diffs,
     }
@@ -435,19 +443,20 @@ def _serialise_result(r: FlipResult) -> dict:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+
 def run_flipper(
-    triton_script:      Path,
+    triton_script: Path,
     matcher_table_json: Path,
-    adjacency_json:     Path,
-    libtriton_so:       Path,
-    output_dir:         Path,
+    adjacency_json: Path,
+    libtriton_so: Path,
+    output_dir: Path,
     *,
-    max_flips:          int | None = None,
-    report_json:        Path | None = None,
-    cooldown_every:     int = 0,
-    cooldown_secs:      float = 30.0,
-    filter_by_ptx:      bool = False,
-    target_mnemonics:   frozenset[str] | None = None,
+    max_flips: int | None = None,
+    report_json: Path | None = None,
+    cooldown_every: int = 0,
+    cooldown_secs: float = 30.0,
+    filter_by_ptx: bool = False,
+    target_mnemonics: frozenset[str] | None = None,
 ) -> list[FlipResult]:
     """Run the full bit-flip test suite and return all results.
 
@@ -485,7 +494,7 @@ def run_flipper(
     """
     output_dir = output_dir.resolve()
 
-    mt_data  = _load_json(matcher_table_json)
+    mt_data = _load_json(matcher_table_json)
     adj_data = _load_json(adjacency_json)
 
     target = NVPTXBackend()
@@ -493,7 +502,7 @@ def run_flipper(
     logger.info(f"MatcherTable VMA: 0x{mt_vma:016x}")
 
     patch_map = _build_patch_map(mt_data)
-    specs     = list(_iter_patch_specs(adj_data, patch_map, mt_vma))
+    specs = list(_iter_patch_specs(adj_data, patch_map, mt_vma))
     logger.info(f"Total specs before filtering: {len(specs):,}")
 
     # --- Baseline ---
@@ -514,8 +523,8 @@ def run_flipper(
 
     specs = _apply_filters(
         specs,
-        ptx_mnemonics    = ptx_mnemonics,
-        target_mnemonics = target_mnemonics,
+        ptx_mnemonics=ptx_mnemonics,
+        target_mnemonics=target_mnemonics,
     )
 
     if max_flips is not None:
@@ -536,10 +545,15 @@ def run_flipper(
         flip_dir.mkdir(parents=True, exist_ok=True)
 
         patch_spec_file = flip_dir / "patch_spec.json"
-        patch_spec_file.write_text(json.dumps({
-            "patch_vmas": list(spec.patch_vmas),
-            "mask":       spec.flip_mask,
-        }, indent=2))
+        patch_spec_file.write_text(
+            json.dumps(
+                {
+                    "patch_vmas": list(spec.patch_vmas),
+                    "mask": spec.flip_mask,
+                },
+                indent=2,
+            )
+        )
 
         _run_inferior(triton_script, flip_dir, patch_spec_path=patch_spec_file)
 

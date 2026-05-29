@@ -41,6 +41,7 @@ _NmSymbol: TypeAlias = tuple[int, int, str, str]
 # Raw subprocess helpers  (private --- call through BinaryCache instead)
 # ---------------------------------------------------------------------------
 
+
 def _run_nm(binary: Path) -> list[_NmSymbol]:
     """Run ``nm -S -Cn`` on *binary* and return the parsed symbol table.
 
@@ -119,6 +120,7 @@ def _run_readelf(binary: Path) -> str:
 # BinaryCache
 # ---------------------------------------------------------------------------
 
+
 class BinaryCache:
     """Per-process cache for expensive ``nm`` and ``readelf`` subprocess output.
 
@@ -141,8 +143,8 @@ class BinaryCache:
     """
 
     def __init__(self) -> None:
-        self._nm:      dict[str, list[_NmSymbol]] = {}
-        self._readelf: dict[str, str]             = {}
+        self._nm: dict[str, list[_NmSymbol]] = {}
+        self._readelf: dict[str, str] = {}
 
     def nm_symbols(self, binary: Path) -> list[_NmSymbol]:
         """Return the nm symbol table for *binary*, running ``nm`` if not cached.
@@ -191,6 +193,7 @@ _default_cache = BinaryCache()
 # ---------------------------------------------------------------------------
 # Binary introspection --- public API
 # ---------------------------------------------------------------------------
+
 
 def _find_rodata_symbol(
     binary: Path,
@@ -303,7 +306,7 @@ def estimate_symbol_byte_size(
         if size > 0:
             return size
         # Gap heuristic: find the next symbol at a strictly higher address.
-        for next_vma, *_ in symbols[i + 1:]:
+        for next_vma, *_ in symbols[i + 1 :]:
             if next_vma > vma:
                 return next_vma - vma
         return SYMBOL_SIZE_FALLBACK
@@ -358,7 +361,7 @@ def linker_vma_to_file_offset(
     for line in elf_text.splitlines():
         m = pat.search(line)
         if m:
-            section_vma  = int(m.group(1), 16)
+            section_vma = int(m.group(1), 16)
             section_foff = int(m.group(2), 16)
             return vma - section_vma + section_foff
 
@@ -371,6 +374,7 @@ def linker_vma_to_file_offset(
 # ---------------------------------------------------------------------------
 # Source-file parsing
 # ---------------------------------------------------------------------------
+
 
 def parse_opcode_enum(seldagisell_h_path: Path) -> dict[str, int]:
     """Parse the ``BuiltinOpcodes`` enum from ``SelectionDAGISel.h``.
@@ -457,6 +461,7 @@ def parse_mvt_map(gen_vt_path: Path) -> dict[int, str]:
 # AsmWriter opcode → mnemonic map
 # ---------------------------------------------------------------------------
 
+
 def _detect_asmstrs_mask(data: bytes, opinfo0_foff: int, opinfo0_size: int) -> int:
     """Detect whether the OpInfo0 table uses a 16-bit or 17-bit AsmStrs index.
 
@@ -526,14 +531,20 @@ def build_opcode_mnemonic_map(
     _cache = cache or _default_cache
 
     base = target.opinfo_symbol_pattern
-    opinfo0_vma, opinfo0_size = _find_rodata_symbol(binary, base + r".*::OpInfo0", cache=_cache)
-    asmstrs_vma, _            = _find_rodata_symbol(binary, base + r".*::AsmStrs",  cache=_cache)
+    opinfo0_vma, opinfo0_size = _find_rodata_symbol(
+        binary, base + r".*::OpInfo0", cache=_cache
+    )
+    asmstrs_vma, _ = _find_rodata_symbol(binary, base + r".*::AsmStrs", cache=_cache)
     logger.debug(
         f"OpInfo0 VMA=0x{opinfo0_vma:x}  size={opinfo0_size}  AsmStrs VMA=0x{asmstrs_vma:x}"
     )
 
-    opinfo0_foff = linker_vma_to_file_offset(binary, ".rodata", opinfo0_vma, cache=_cache)
-    asmstrs_foff = linker_vma_to_file_offset(binary, ".rodata", asmstrs_vma, cache=_cache)
+    opinfo0_foff = linker_vma_to_file_offset(
+        binary, ".rodata", opinfo0_vma, cache=_cache
+    )
+    asmstrs_foff = linker_vma_to_file_offset(
+        binary, ".rodata", asmstrs_vma, cache=_cache
+    )
 
     asmstrs_mask = _detect_asmstrs_mask(data, opinfo0_foff, opinfo0_size)
     logger.debug(f"AsmStrs mask=0x{asmstrs_mask:x}")
@@ -551,7 +562,7 @@ def build_opcode_mnemonic_map(
         if str_off >= len(data):
             continue
         try:
-            end      = data.index(b"\x00", str_off)
+            end = data.index(b"\x00", str_off)
             mnemonic = data[str_off:end].decode("ascii", errors="replace")
             mnemonic = mnemonic.replace("\t", "").strip()
             if mnemonic:

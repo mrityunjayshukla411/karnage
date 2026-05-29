@@ -112,13 +112,13 @@ class NVPTXBackend(TargetBackend):
     NVPTX backend linked from its own LLVM build.
     """
 
-    name:                 str           = "NVPTX"
-    cmake_target_name:    str           = "NVPTX"
-    tablegen_targets:     tuple[str, ...] = ("NVPTXCommonTableGen",)
-    matchertable_symbol:  str           = (
+    name: str = "NVPTX"
+    cmake_target_name: str = "NVPTX"
+    tablegen_targets: tuple[str, ...] = ("NVPTXCommonTableGen",)
+    matchertable_symbol: str = (
         "llvm::NVPTXDAGToDAGISel::SelectCode(llvm::SDNode*)::MatcherTable"
     )
-    opinfo_symbol_pattern: str          = r"NVPTXInstPrinter.*getMnemonic"
+    opinfo_symbol_pattern: str = r"NVPTXInstPrinter.*getMnemonic"
 
     def filter_mvt_map(self, mvt_map: dict[int, str]) -> dict[int, str]:
         """Filter the MVT map down to types valid in the PTX ISA.
@@ -143,9 +143,10 @@ class NVPTXBackend(TargetBackend):
             Filtered dict containing only PTX-compatible MVT entries.
         """
         _EXCLUDED_PREFIXES = ("nxv", "riscv", "aarch64", "arm", "mips", "x86", "ppc")
-        _EXCLUDED_EXACT    = frozenset({"i2", "f80", "f128", "ppcf128", "i256", "i512"})
+        _EXCLUDED_EXACT = frozenset({"i2", "f80", "f128", "ppcf128", "i256", "i512"})
         return {
-            k: v for k, v in mvt_map.items()
+            k: v
+            for k, v in mvt_map.items()
             if v not in _EXCLUDED_EXACT
             and not any(v.startswith(p) for p in _EXCLUDED_PREFIXES)
         }
@@ -164,11 +165,11 @@ class NVPTXBackend(TargetBackend):
             Dict of ``{logical_name: Path}`` for each required file.
         """
         build_path = llvm_path / "build"
-        src_path   = llvm_path / "repo" / "llvm"
+        src_path = llvm_path / "repo" / "llvm"
         return {
-            "dagsel":        build_path / "lib/Target/NVPTX/NVPTXGenDAGISel.inc",
-            "asmwriter":     build_path / "lib/Target/NVPTX/NVPTXGenAsmWriter.inc",
-            "instrinfo":     build_path / "lib/Target/NVPTX/NVPTXGenInstrInfo.inc",
-            "genvt":         build_path / "include/llvm/CodeGen/GenVT.inc",
-            "seldagisell_h": src_path   / "include/llvm/CodeGen/SelectionDAGISel.h",
+            "dagsel": build_path / "lib/Target/NVPTX/NVPTXGenDAGISel.inc",
+            "asmwriter": build_path / "lib/Target/NVPTX/NVPTXGenAsmWriter.inc",
+            "instrinfo": build_path / "lib/Target/NVPTX/NVPTXGenInstrInfo.inc",
+            "genvt": build_path / "include/llvm/CodeGen/GenVT.inc",
+            "seldagisell_h": src_path / "include/llvm/CodeGen/SelectionDAGISel.h",
         }

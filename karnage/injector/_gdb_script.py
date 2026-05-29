@@ -24,9 +24,11 @@ Environment variables consumed:
 
 Docker note: requires --cap-add SYS_PTRACE (or --security-opt seccomp=unconfined).
 """
-import gdb
+
 import json
 import os
+
+import gdb
 
 gdb.execute("set pagination off")
 gdb.execute("set debuginfod enabled off", to_string=True)
@@ -46,7 +48,7 @@ def _get_load_base(pid: int, soname: str) -> int:
                 continue
             parts = line.split()
             if len(parts) >= 3 and int(parts[2], 16) == 0:
-                return int(parts[0].split('-')[0], 16)
+                return int(parts[0].split("-")[0], 16)
     raise RuntimeError(f"{soname!r} not found in /proc/{pid}/maps")
 
 
@@ -60,7 +62,7 @@ def _apply_patches(patch_vmas: list, mask: int) -> None:
     for vma in patch_vmas:
         addr = load_base + vma
         try:
-            buf     = bytes(inf.read_memory(addr, 1))
+            buf = bytes(inf.read_memory(addr, 1))
             patched = buf[0] ^ mask
             inf.write_memory(addr, bytes([patched]))
             gdb.write(f"[karnage]   0x{addr:016x}: 0x{buf[0]:02x} -> 0x{patched:02x}\n")

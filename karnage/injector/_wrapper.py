@@ -14,10 +14,11 @@ Environment variables consumed:
     TRITON_CACHE_DIR    --- set by runner.py; Triton writes PTX here
     TRITON_ALWAYS_COMPILE --- set to "1" by runner.py
 """
+
 import os
-import sys
 import pathlib
 import runpy
+import sys
 
 output_dir = pathlib.Path(os.environ["KARNAGE_OUTPUT_DIR"])
 output_dir.mkdir(parents=True, exist_ok=True)
@@ -40,6 +41,7 @@ except BaseException as exc:
 
 try:
     import torch
+
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     for name, val in ns.items():
