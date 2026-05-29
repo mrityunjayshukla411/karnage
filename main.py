@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-karnage — LLVM MatcherTable fault-injection toolkit.
+karnage --- LLVM MatcherTable fault-injection toolkit.
 
 Subcommands
 -----------
@@ -28,7 +28,7 @@ from karnage.builder.builder import (
     build_llvm,
 )
 from karnage.extractor.extractor import get_matchertable_bounds, run, walk
-from karnage.injector import run_tester
+from karnage.injector import run_flipper
 from karnage.utils.constants import (
     DEFAULT_ADJACENCY,
     DEFAULT_MATCHER_TABLE,
@@ -98,9 +98,9 @@ def _cmd_extract(args: argparse.Namespace) -> None:
 
     Writes two output files:
 
-    - ``--matcher-table`` (default: ``matcher_table.json``) — full pattern
+    - ``--matcher-table`` (default: ``matcher_table.json``) --- full pattern
       database produced by scanning the MatcherTable bytecode.
-    - ``--adjacency`` (default: ``adjacency.json``) — pairs of opcodes that
+    - ``--adjacency`` (default: ``adjacency.json``) --- pairs of opcodes that
       differ by a single bit in their encoding, derived from the above.
 
     Args:
@@ -198,7 +198,7 @@ def _cmd_inject(args: argparse.Namespace) -> None:
         if args.mnemonics else None
     )
 
-    run_tester(
+    run_flipper(
         triton_script      = args.script,
         matcher_table_json = args.matcher_table,
         adjacency_json     = args.adjacency,

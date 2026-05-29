@@ -67,7 +67,7 @@ class FlipInfo:
     """Description of a single bit flip applied to an opcode byte.
 
     Attributes:
-        byte: Which opcode byte is flipped — either ``"opc_lo"`` or ``"opc_hi"``.
+        byte: Which opcode byte is flipped --- either ``"opc_lo"`` or ``"opc_hi"``.
         bit:  Bit position within that byte (0 = LSB, 7 = MSB).
         mask: Bitmask for the flip, equal to ``1 << bit``.
     """

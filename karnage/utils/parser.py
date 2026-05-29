@@ -4,17 +4,17 @@ Binary introspection and source-file parsing utilities for the karnage pipeline.
 Three separate concerns are provided here:
 
   Binary introspection (nm / readelf)
-    BinaryCache                  — explicit-lifecycle cache for subprocess output.
-    find_symbol_linker_vma       — look up a symbol's linker-assigned VMA.
-    estimate_symbol_byte_size    — look up or estimate a symbol's byte size.
-    linker_vma_to_file_offset    — translate a VMA to an on-disk byte offset.
+    BinaryCache                  --- explicit-lifecycle cache for subprocess output.
+    find_symbol_linker_vma       --- look up a symbol's linker-assigned VMA.
+    estimate_symbol_byte_size    --- look up or estimate a symbol's byte size.
+    linker_vma_to_file_offset    --- translate a VMA to an on-disk byte offset.
 
   Source-file parsing
-    parse_opcode_enum            — parse BuiltinOpcodes from SelectionDAGISel.h.
-    parse_mvt_map                — parse MVT::SimpleValueType values from GenVT.inc.
+    parse_opcode_enum            --- parse BuiltinOpcodes from SelectionDAGISel.h.
+    parse_mvt_map                --- parse MVT::SimpleValueType values from GenVT.inc.
 
   AsmWriter table reading
-    build_opcode_mnemonic_map    — build {opcode: mnemonic} by reading OpInfo0/AsmStrs.
+    build_opcode_mnemonic_map    --- build {opcode: mnemonic} by reading OpInfo0/AsmStrs.
 """
 
 import re
@@ -38,7 +38,7 @@ _NmSymbol: TypeAlias = tuple[int, int, str, str]
 
 
 # ---------------------------------------------------------------------------
-# Raw subprocess helpers  (private — call through BinaryCache instead)
+# Raw subprocess helpers  (private --- call through BinaryCache instead)
 # ---------------------------------------------------------------------------
 
 def _run_nm(binary: Path) -> list[_NmSymbol]:
@@ -125,7 +125,7 @@ class BinaryCache:
     Running ``nm`` or ``readelf`` on a 300 MB shared object takes ~1–2 seconds.
     When multiple symbols are looked up from the same binary it is critical to
     invoke each tool only once.  Storing results in an explicit class (rather
-    than module-level dicts) gives callers control over the cache lifetime —
+    than module-level dicts) gives callers control over the cache lifetime ---
     it can be cleared between test runs, replaced with a test double, or
     scoped to a single pipeline execution.
 
@@ -152,7 +152,7 @@ class BinaryCache:
 
         Returns:
             List of ``(vma, size, sym_type, demangled_name)`` tuples sorted by
-            VMA in ascending order.  The list is shared — do not mutate it.
+            VMA in ascending order.  The list is shared --- do not mutate it.
         """
         key = str(binary)
         if key not in self._nm:
@@ -189,7 +189,7 @@ _default_cache = BinaryCache()
 
 
 # ---------------------------------------------------------------------------
-# Binary introspection — public API
+# Binary introspection --- public API
 # ---------------------------------------------------------------------------
 
 def _find_rodata_symbol(
@@ -262,7 +262,7 @@ def find_symbol_linker_vma(
         if name == demangled_name:
             return vma
     raise ParserError(
-        f"Symbol not found: {demangled_name!r} — binary may have been stripped.",
+        f"Symbol not found: {demangled_name!r} --- binary may have been stripped.",
         context={"binary": str(binary), "symbol": demangled_name},
     )
 
@@ -277,10 +277,10 @@ def estimate_symbol_byte_size(
 
     Resolution order:
 
-    1. **ELF size from ``nm -S``** — exact and preferred.
-    2. **Gap to next symbol** — fallback for symbols whose ELF size is zero
+    1. **ELF size from ``nm -S``** --- exact and preferred.
+    2. **Gap to next symbol** --- fallback for symbols whose ELF size is zero
        (common for static-local arrays in older toolchains).
-    3. **SYMBOL_SIZE_FALLBACK** — last resort when no symbol with a higher
+    3. **SYMBOL_SIZE_FALLBACK** --- last resort when no symbol with a higher
        VMA exists at all.
 
     Args:
@@ -419,7 +419,7 @@ def parse_mvt_map(gen_vt_path: Path) -> dict[int, str]:
     file order, because ``INVALID_SIMPLE_VALUE_TYPE = 0`` is hardcoded before
     the macro list.
 
-    Note: ``sz`` is bit-width for scalars and element-count for vectors —
+    Note: ``sz`` is bit-width for scalars and element-count for vectors ---
     **not** the enum integer value.
 
     Args:
@@ -494,7 +494,7 @@ def build_opcode_mnemonic_map(
 ) -> dict[int, str]:
     """Build a complete ``{opcode_int: mnemonic_str}`` map from the binary.
 
-    Reads ``OpInfo0`` and ``AsmStrs`` directly — static-local arrays of
+    Reads ``OpInfo0`` and ``AsmStrs`` directly --- static-local arrays of
     ``getMnemonic`` that nm exposes as read-only symbols with exact VMAs.
     No disassembly is required.  The AsmStrs index width (16- or 17-bit) is
     auto-detected from the live OpInfo0 data so the same code handles both

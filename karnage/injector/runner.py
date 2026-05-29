@@ -126,7 +126,7 @@ def _iter_patch_specs(
         if not mt_offsets:
             logger.warning(
                 f"Opcode {opcode_a} ({instr['mnemonic']!r}) "
-                f"not in matcher_table.json — skipping"
+                f"not in matcher_table.json --- skipping"
             )
             continue
 
@@ -169,8 +169,8 @@ def _run_inferior(
     command script; ``KARNAGE_PATCH_SPEC`` points GDB to the patch JSON.
 
     Output files written to *output_dir*:
-    - ``stdout.txt`` / ``stderr.txt`` — captured process output.
-    - ``returncode.txt`` — integer exit code as a string.
+    - ``stdout.txt`` / ``stderr.txt`` --- captured process output.
+    - ``returncode.txt`` --- integer exit code as a string.
 
     Args:
         triton_script:   Path to the user Triton script.
@@ -386,7 +386,7 @@ def _compare(
                 except Exception as exc:
                     # torch.load can raise many unrelated exception types
                     # (pickle errors, version mismatches, CUDA errors) that
-                    # have no single catchable base class — broad catch is
+                    # have no single catchable base class --- broad catch is
                     # intentional here.
                     logger.warning(f"  tensor compare failed for {name!r}: {exc}")
 
@@ -435,7 +435,7 @@ def _serialise_result(r: FlipResult) -> dict:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run_tester(
+def run_flipper(
     triton_script:      Path,
     matcher_table_json: Path,
     adjacency_json:     Path,
@@ -500,7 +500,7 @@ def run_tester(
     baseline_dir = output_dir / "baseline"
     logger.info("Running baseline (no patch)...")
     if not _run_inferior(triton_script, baseline_dir):
-        logger.warning("Baseline run failed — see baseline/stderr.txt")
+        logger.warning("Baseline run failed --- see baseline/stderr.txt")
 
     # --- Filter specs ---
     ptx_mnemonics: frozenset[str] | None = None
@@ -508,7 +508,7 @@ def run_tester(
         ptx_mnemonics = extract_ptx_mnemonics(baseline_dir)
         if not ptx_mnemonics:
             logger.warning(
-                "Relevance filter requested but no PTX files found in baseline — "
+                "Relevance filter requested but no PTX files found in baseline --- "
                 "filter has no effect. Check that TRITON_CACHE_DIR is being written."
             )
 
@@ -562,7 +562,7 @@ def run_tester(
         flips_done = len(results)
         if cooldown_every > 0 and flips_done % cooldown_every == 0:
             logger.info(
-                f"[cooldown] {flips_done} flips done — "
+                f"[cooldown] {flips_done} flips done --- "
                 f"sleeping {cooldown_secs:.0f}s to let GPU cool..."
             )
             time.sleep(cooldown_secs)

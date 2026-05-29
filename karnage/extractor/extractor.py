@@ -1,9 +1,9 @@
 """
-extractor/extractor.py — LLVM MatcherTable bounds locator.
+extractor/extractor.py --- LLVM MatcherTable bounds locator.
 
 Provides:
-  get_matchertable_bounds()    — locate the table in a binary
-  walk()   — entry point; returns tuple[MatcherEntry, ...]
+  get_matchertable_bounds()    --- locate the table in a binary
+  walk()   --- entry point; returns tuple[MatcherEntry, ...]
 """
 
 from __future__ import annotations
@@ -169,12 +169,12 @@ def _build_skip_table(
     Build a lightweight dispatch map:  opcode_byte → skip_descriptor.
 
     Descriptor meanings:
-        int  n   — skip exactly n bytes
-        'vbr'    — skip one VBR (unsigned)
-        'svbr'   — skip one signed VBR (GetSignedVBR)
-        'mvt'    — skip one getSimpleVT() VBR (same encoding as 'vbr')
-        'hwmode' — skip 1 byte (HwMode index)
-        special  — None (handled by the walk loop directly)
+        int  n   --- skip exactly n bytes
+        'vbr'    --- skip one VBR (unsigned)
+        'svbr'   --- skip one signed VBR (GetSignedVBR)
+        'mvt'    --- skip one getSimpleVT() VBR (same encoding as 'vbr')
+        'hwmode' --- skip 1 byte (HwMode index)
+        special  --- None (handled by the walk loop directly)
 
     Opcodes in node_variants (MorphNodeTo/EmitNode) and control flow opcodes
     (Scope, SwitchType, SwitchOpcode, CompleteMatch) return None; the walk
@@ -264,7 +264,7 @@ def _build_skip_table(
         'OPC_CheckTypeResByHwMode',     # Res + HwMode
     ], 2)
 
-    # CheckChild*Opcode — 2 bytes (opc_lo + opc_hi), not in all LLVM versions
+    # CheckChild*Opcode --- 2 bytes (opc_lo + opc_hi), not in all LLVM versions
     for ch in range(8):
         v = e(f'OPC_CheckChild{ch}Opcode')
         if v is not None:
@@ -300,16 +300,16 @@ def _build_skip_table(
         'OPC_CheckChild6Type', 'OPC_CheckChild7Type',
     ], 'mvt')
 
-    # OPC_CheckTypeRes: 1 byte Res + MVT VBR — special
-    # OPC_CheckPredicateWithOperands: OpNum + OpNum bytes + PredNo — special
-    # OPC_EmitMergeInputChains: NumChains + NumChains bytes — special
-    # OPC_EmitRegister: MVT VBR + RegNo byte — special
-    # OPC_EmitRegisterByHwMode: 1 byte HwMode + RegNo byte — special
-    # OPC_EmitRegister2: MVT VBR + 2 byte RegNo — special
-    # OPC_EmitRegisterByHwMode2: 1 byte HwMode + 2 byte RegNo — special
-    # OPC_EmitIntegerI8/I16/I32/I64: no VT byte + signed VBR value — special
-    # OPC_EmitIntegerByHwMode: 1 byte HwMode + signed VBR value — special
-    # OPC_EmitInteger: MVT VBR + signed VBR value — special
+    # OPC_CheckTypeRes: 1 byte Res + MVT VBR --- special
+    # OPC_CheckPredicateWithOperands: OpNum + OpNum bytes + PredNo --- special
+    # OPC_EmitMergeInputChains: NumChains + NumChains bytes --- special
+    # OPC_EmitRegister: MVT VBR + RegNo byte --- special
+    # OPC_EmitRegisterByHwMode: 1 byte HwMode + RegNo byte --- special
+    # OPC_EmitRegister2: MVT VBR + 2 byte RegNo --- special
+    # OPC_EmitRegisterByHwMode2: 1 byte HwMode + 2 byte RegNo --- special
+    # OPC_EmitIntegerI8/I16/I32/I64: no VT byte + signed VBR value --- special
+    # OPC_EmitIntegerByHwMode: 1 byte HwMode + signed VBR value --- special
+    # OPC_EmitInteger: MVT VBR + signed VBR value --- special
 
     # Mark special opcodes explicitly (value None means "handled in walk loop")
     _specials = [
@@ -329,7 +329,7 @@ def _build_skip_table(
         if v is not None:
             skip[v] = None  # walker handles these explicitly
 
-    # Node variants (MorphNodeTo*, EmitNode*) — also handled explicitly
+    # Node variants (MorphNodeTo*, EmitNode*) --- also handled explicitly
     for ov in node_variants:
         skip[ov] = None
 
@@ -494,10 +494,10 @@ def walk(
     skip_table    = _build_skip_table(enum_map, node_variants)
 
     # Work queue items: (pos, limit, ctx_mvt, ctx_arm_len)
-    #   pos          — current byte position in data
-    #   limit        — one past the last byte of this sub-tree (mt_end for root)
-    #   ctx_mvt      — MVT byte from the enclosing OPC_SwitchType arm (0 = unknown)
-    #   ctx_arm_len  — arm_size from that arm (0 = unknown)
+    #   pos          --- current byte position in data
+    #   limit        --- one past the last byte of this sub-tree (mt_end for root)
+    #   ctx_mvt      --- MVT byte from the enclosing OPC_SwitchType arm (0 = unknown)
+    #   ctx_arm_len  --- arm_size from that arm (0 = unknown)
     queue: list[tuple[int, int, int, int]] = [
         (mt_offset, mt_end, 0, 0)
     ]
@@ -669,7 +669,7 @@ def walk(
 
             descriptor = skip_table.get(b)
             if descriptor is None:
-                # Unknown opcode — gap in our table or data corruption.
+                # Unknown opcode --- gap in our table or data corruption.
                 # Abandon this sub-tree; guessing a 1-byte skip would cascade.
                 logger.debug(f"Walker: unknown opcode 0x{b:02x} at pos 0x{pos-1:x}, abandoning branch")
                 break
@@ -757,7 +757,7 @@ def _collect_opcode_map(data: dict) -> dict[tuple[int, int], OpcodeInfo]:
             hi  = int(enc["opc_hi"], 16)
             key = (lo, hi)
             if key in opcode_map:
-                # Duplicate (lo, hi) across different mnemonics — keep first.
+                # Duplicate (lo, hi) across different mnemonics --- keep first.
                 logger.warning(
                     f"Duplicate (opc_lo={lo:#04x}, opc_hi={hi:#04x}): "
                     f"keeping '{opcode_map[key].mnemonic}', skipping '{mnemonic}'"

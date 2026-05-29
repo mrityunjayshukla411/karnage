@@ -1,3 +1,3 @@
-from .runner import run_tester, FlipResult, PatchSpec
+from .runner import run_flipper, FlipResult, PatchSpec
 
-__all__ = ["run_tester", "FlipResult", "PatchSpec"]
+__all__ = ["run_flipper", "FlipResult", "PatchSpec"]

@@ -1,5 +1,5 @@
 """
-_gdb_script.py — GDB Python script for MatcherTable bit-flip injection.
+_gdb_script.py --- GDB Python script for MatcherTable bit-flip injection.
 
 Loaded by the orchestrator via:
     gdb --batch -q -x _gdb_script.py --args python _wrapper.py <triton_script.py>
@@ -13,13 +13,13 @@ Why new_objfile instead of stop-on-solib-events:
   gdb.events.new_objfile fires while the inferior is paused at the dynamic
   linker probe point (_dl_debug_state).  Memory is fully mapped and writable
   via ptrace at that point.  After our handler returns, the inferior resumes
-  automatically — no explicit continue required.  gdb.execute("run") then
+  automatically --- no explicit continue required.  gdb.execute("run") then
   blocks until the inferior exits normally, which is exactly what we need in
   batch mode.
 
 Environment variables consumed:
-  KARNAGE_PATCH_SPEC   — path to {"patch_vmas": [int, ...], "mask": int}
-  KARNAGE_TARGET_SO    — substring matched against objfile filenames
+  KARNAGE_PATCH_SPEC   --- path to {"patch_vmas": [int, ...], "mask": int}
+  KARNAGE_TARGET_SO    --- substring matched against objfile filenames
                          (default: "libtriton.so")
 
 Docker note: requires --cap-add SYS_PTRACE (or --security-opt seccomp=unconfined).

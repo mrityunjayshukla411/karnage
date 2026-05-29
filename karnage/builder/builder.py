@@ -3,11 +3,11 @@
 This module handles the three-step process of preparing the LLVM headers
 that the extractor needs:
 
-1. **Detect** — extract the LLVM commit hash embedded in the target binary
+1. **Detect** --- extract the LLVM commit hash embedded in the target binary
    (``libtriton.so``) via ``strings``.
-2. **Download** — fetch the matching ``llvm-project`` source archive from
+2. **Download** --- fetch the matching ``llvm-project`` source archive from
    GitHub if not already cached.
-3. **Build** — run CMake to generate only the tablegen ``.inc`` files required
+3. **Build** --- run CMake to generate only the tablegen ``.inc`` files required
    by the target backend; all other LLVM build targets are disabled.
 
 Results are cached under ``.karnage_cache/llvm-<commit>/`` relative to the
@@ -146,7 +146,7 @@ def _download_archive(url: str, dest_dir: Path) -> None:
         cmd = ["wget", "-q", "-O", filename, url]
     else:
         raise LLVMProjectDownloadError(
-            "Neither curl nor wget found — cannot download LLVM source",
+            "Neither curl nor wget found --- cannot download LLVM source",
             context={"url": url},
         )
 
@@ -210,7 +210,7 @@ def build_llvm(
         shutil.rmtree(llvm_cache_dir)
 
     if _is_cache_valid() and not force_rebuild:
-        logger.info(f"Build for {commit_hash} already cached — skipping.")
+        logger.info(f"Build for {commit_hash} already cached --- skipping.")
         return build_dir
 
     llvm_cache_dir.mkdir(parents=True, exist_ok=True)

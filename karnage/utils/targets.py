@@ -7,7 +7,7 @@ the generated ``.inc`` files live, which nm symbol pattern identifies the
 types actually used by the target's ISA.
 
 Adding support for a new backend (e.g. AMDGPU) requires only a new
-:class:`TargetBackend` subclass — no changes to the pipeline core.
+:class:`TargetBackend` subclass --- no changes to the pipeline core.
 """
 
 from abc import ABC, abstractmethod
@@ -69,11 +69,11 @@ class TargetBackend(ABC):
 
         Keys are stable logical names consumed by the parser:
 
-        - ``"dagsel"``        — ``*GenDAGISel.inc``
-        - ``"asmwriter"``     — ``*GenAsmWriter.inc``
-        - ``"instrinfo"``     — ``*GenInstrInfo.inc``
-        - ``"genvt"``         — ``GenVT.inc``
-        - ``"seldagisell_h"`` — ``SelectionDAGISel.h`` (source tree, not build)
+        - ``"dagsel"``        --- ``*GenDAGISel.inc``
+        - ``"asmwriter"``     --- ``*GenAsmWriter.inc``
+        - ``"instrinfo"``     --- ``*GenInstrInfo.inc``
+        - ``"genvt"``         --- ``GenVT.inc``
+        - ``"seldagisell_h"`` --- ``SelectionDAGISel.h`` (source tree, not build)
 
         Args:
             llvm_path: Root of the per-commit cache directory, containing
@@ -129,7 +129,7 @@ class NVPTXBackend(TargetBackend):
 
         Excluded categories:
 
-        - Scalable vectors (``nxv*``) — AArch64 SVE / RISC-V V extension.
+        - Scalable vectors (``nxv*``) --- AArch64 SVE / RISC-V V extension.
         - Other-target scalars: ``f80`` (x87), ``ppcf128``, ``f128``
           (quad-precision), ``i2``, ``i256``, ``i512`` (no PTX equivalent).
         - Architecture-prefixed types: ``riscv``, ``aarch64``, ``arm``,

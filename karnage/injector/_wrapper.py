@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-_wrapper.py — Inferior wrapper for GDB-based MatcherTable fault injection.
+_wrapper.py --- Inferior wrapper for GDB-based MatcherTable fault injection.
 
 GDB runs this script as the inferior:
     python _wrapper.py <triton_script.py> [args...]
@@ -10,9 +10,9 @@ namespace is saved to KARNAGE_OUTPUT_DIR/{name}.pt so the outer orchestrator
 can compare baseline vs patched results without parsing stdout.
 
 Environment variables consumed:
-    KARNAGE_OUTPUT_DIR  — directory for tensor files (created if absent)
-    TRITON_CACHE_DIR    — set by runner.py; Triton writes PTX here
-    TRITON_ALWAYS_COMPILE — set to "1" by runner.py
+    KARNAGE_OUTPUT_DIR  --- directory for tensor files (created if absent)
+    TRITON_CACHE_DIR    --- set by runner.py; Triton writes PTX here
+    TRITON_ALWAYS_COMPILE --- set to "1" by runner.py
 """
 import os
 import sys

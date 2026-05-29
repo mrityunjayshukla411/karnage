@@ -28,7 +28,7 @@ def run_subprocess(
 
     Wrapping the resulting :exc:`subprocess.CalledProcessError` into the
     appropriate :exc:`~karnage.utils.exceptions.KarnageError` subclass is
-    the **caller's** responsibility — this function deliberately stays
+    the **caller's** responsibility --- this function deliberately stays
     domain-agnostic.
 
     Args:
