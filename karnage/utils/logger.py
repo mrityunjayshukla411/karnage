@@ -1,11 +1,16 @@
 import logging
 import time
 
+from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 from rich.traceback import install
 
 install()
+
+# Shared console used by both the logger handler and progress bars.
+# Importing `console` from this module guarantees a single Live context.
+console = Console(stderr=True)
 
 
 class KarnageFormatter(logging.Formatter):
@@ -70,6 +75,7 @@ logger.propagate = False
 if not logger.handlers:
 
     rich_handler = KarnageRichHandler(
+        console=console,
         rich_tracebacks=True,
         markup=True,
         show_path=False,

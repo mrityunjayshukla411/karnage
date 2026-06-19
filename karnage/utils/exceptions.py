@@ -12,8 +12,7 @@ class KarnageError(Exception):
 
     Args:
         message: Human-readable description of the error.
-        context: Optional dict of structured fields for programmatic inspection
-                 (e.g. ``{"binary": "/path/to/lib.so", "symbol": "..."}``).
+        context: Optional dict of structured fields for programmatic inspection.
     """
 
     def __init__(self, message: str, context: dict | None = None) -> None:
@@ -21,53 +20,24 @@ class KarnageError(Exception):
         self.context: dict = context or {}
 
 
-class LLVMProjectDownloadError(KarnageError):
-    """The LLVM source archive could not be downloaded or extracted.
-
-    Raised when ``curl``/``wget`` returns a non-zero exit code or when
-    ``unzip`` fails to extract the downloaded archive.
-    """
-
-
-class LibraryNotFoundError(KarnageError):
-    """The target shared library (e.g. ``libtriton.so``) was not found.
-
-    Raised when the explicit ``--library`` path does not exist or when
-    auto-detection via ``pip show`` fails to locate the package.
-    """
-
-
-class CommitResolutionError(KarnageError):
-    """The LLVM commit hash embedded in the binary could not be determined.
-
-    Raised when ``strings`` produces no output matching the expected
-    ``LLVM version X.Y.Z (<40-char hex>)`` pattern.
-    """
-
-
-class LLVMProjectBuildError(KarnageError):
-    """A CMake configure or build step for ``llvm-project`` failed.
-
-    Raised when either the ``cmake -S … -B …`` configure invocation or a
-    ``cmake --build … --target …`` build invocation exits non-zero.
-    """
-
-
 class ParserError(KarnageError):
-    """An error occurred while parsing binary or source files.
+    """An error occurred while parsing binary files.
 
-    Covers failures from ``nm``, ``readelf``, regex mismatches in
-    ``SelectionDAGISel.h`` / ``GenVT.inc``, and empty AsmWriter tables.
+    Covers failures from ``nm``, ``readelf``, and regex mismatches.
     """
 
 
-class InjectorError(KarnageError):
-    """Base class for injector-module errors."""
+class ScannerError(KarnageError):
+    """An error occurred during target-independent function discovery.
+
+    Raised when ``nm`` fails on the target binary or when no matching
+    symbols are found.
+    """
 
 
-class MatcherTableLoadError(InjectorError):
-    """``matcher_table.json`` could not be loaded or has an unexpected schema.
+class FlipperError(KarnageError):
+    """An error occurred during the GDB-based flip test run.
 
-    Raised when the file is missing, not valid JSON, or missing required
-    top-level keys such as ``"instructions"``.
+    Raised when ``flip_sites.json`` cannot be loaded or has an unexpected
+    schema.
     """

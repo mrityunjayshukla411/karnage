@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "karnage"
-version = "0.1.0"
-description = "LLVM playground tooling suite"
+version = "0.2.0"
+description = "Target-independent LLVM bit-flip explorer"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

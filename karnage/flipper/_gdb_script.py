@@ -17,6 +17,11 @@ Why new_objfile instead of stop-on-solib-events:
   blocks until the inferior exits normally, which is exactly what we need in
   batch mode.
 
+Stdout / stderr separation:
+  All karnage diagnostic output goes through gdb.write(..., gdb.STDERR) so
+  it lands on the GDB process's stderr.  The inferior's own print() calls
+  reach proc.stdout uncontaminated, which the runner uses for stdout diff.
+
 Environment variables consumed:
   KARNAGE_PATCH_SPEC   --- path to {"patch_vmas": [int, ...], "mask": int}
   KARNAGE_TARGET_SO    --- substring matched against objfile filenames
@@ -32,6 +37,8 @@ import gdb
 
 gdb.execute("set pagination off")
 gdb.execute("set debuginfod enabled off", to_string=True)
+gdb.execute("set print thread-events off")
+gdb.execute("set print inferior-events off")
 
 _TARGET_SO = os.environ.get("KARNAGE_TARGET_SO", "libtriton.so")
 _patched = False
@@ -57,7 +64,8 @@ def _apply_patches(patch_vmas: list, mask: int) -> None:
     load_base = _get_load_base(inf.pid, _TARGET_SO)
     gdb.write(
         f"[karnage] load_base=0x{load_base:016x}  "
-        f"mask=0x{mask:02x}  targets={len(patch_vmas)}\n"
+        f"mask=0x{mask:02x}  targets={len(patch_vmas)}\n",
+        gdb.STDERR,
     )
     for vma in patch_vmas:
         addr = load_base + vma
@@ -65,9 +73,15 @@ def _apply_patches(patch_vmas: list, mask: int) -> None:
             buf = bytes(inf.read_memory(addr, 1))
             patched = buf[0] ^ mask
             inf.write_memory(addr, bytes([patched]))
-            gdb.write(f"[karnage]   0x{addr:016x}: 0x{buf[0]:02x} -> 0x{patched:02x}\n")
+            gdb.write(
+                f"[karnage]   0x{addr:016x}: 0x{buf[0]:02x} -> 0x{patched:02x}\n",
+                gdb.STDERR,
+            )
         except gdb.MemoryError as exc:
-            gdb.write(f"[karnage]   write failed at 0x{addr:016x}: {exc}\n")
+            gdb.write(
+                f"[karnage]   write failed at 0x{addr:016x}: {exc}\n",
+                gdb.STDERR,
+            )
 
 
 def on_new_objfile(event):
@@ -87,7 +101,7 @@ def on_new_objfile(event):
             spec = json.load(f)
         _apply_patches(spec["patch_vmas"], spec["mask"])
     except Exception as exc:
-        gdb.write(f"[karnage] patch error: {exc}\n")
+        gdb.write(f"[karnage] patch error: {exc}\n", gdb.STDERR)
 
 
 gdb.events.new_objfile.connect(on_new_objfile)
