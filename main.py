@@ -179,11 +179,11 @@ def _cmd_report(args: argparse.Namespace) -> None:
         json.dump(results, f, indent=2)
 
     crashed = sum(1 for r in results if r["crashed"])
-    ptx_changed = sum(1 for r in results if r["ptx_changed"])
+    codegen_changed = sum(1 for r in results if r["codegen_changed"])
     stdout_changed = sum(1 for r in results if r["stdout_changed"])
     logger.success(
         f"Report: {len(results)} flips reconstructed — "
-        f"{crashed} crashed, {ptx_changed} PTX diff, {stdout_changed} stdout diff "
+        f"{crashed} crashed, {codegen_changed} codegen diff, {stdout_changed} stdout diff "
         f"→ {args.report}"
     )
 

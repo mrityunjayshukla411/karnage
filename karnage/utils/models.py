@@ -39,17 +39,18 @@ class FlipResult:
     Mutable so it can be populated incrementally during a test run.
 
     Attributes:
-        spec:           The :class:`PatchSpec` that produced this result.
-        crashed:        ``True`` if GDB or the inferior exited non-zero.
-        timed_out:      ``True`` if the flip run exceeded the per-flip timeout.
-        script_ran:     ``True`` if ``_wrapper.py`` reached its ``_done`` sentinel.
-        ptx_changed:    ``True`` if the generated PTX differs from the baseline.
-        stdout_changed: ``True`` if the application's stdout differs from the baseline.
+        spec:            The :class:`PatchSpec` that produced this result.
+        crashed:         ``True`` if GDB or the inferior exited non-zero.
+        timed_out:       ``True`` if the flip run exceeded the per-flip timeout.
+        script_ran:      ``True`` if ``_wrapper.py`` reached its ``_done`` sentinel.
+        codegen_changed: ``True`` if any text codegen output (PTX, AMDGCN, LLVM IR,
+                         TTGIR, TTIR) differs from the baseline.  Backend-agnostic.
+        stdout_changed:  ``True`` if the application's stdout differs from the baseline.
     """
 
     spec: PatchSpec
     crashed: bool
     timed_out: bool
     script_ran: bool
-    ptx_changed: bool
+    codegen_changed: bool
     stdout_changed: bool

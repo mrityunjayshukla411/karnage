@@ -210,19 +210,40 @@ def _run_inferior(
 
 
 # ---------------------------------------------------------------------------
-# PTX collection (kept for --filter-by-ptx and PTX_DIFF reporting)
+# Codegen output collection — backend-agnostic
 # ---------------------------------------------------------------------------
 
+# Text-based codegen artefacts produced by the Triton cache.
+# NVIDIA: .ptx                AMD: .amdgcn
+# Both:   .llir (LLVM IR), .ttgir (TritonGPU IR), .ttir (Triton IR)
+# Excluded: .hsaco / .cubin (binary), .json (metadata)
+_CODEGEN_SUFFIXES: tuple[str, ...] = (
+    "*.ptx",    # NVIDIA PTX assembly
+    "*.amdgcn", # AMD GCN assembly
+    "*.llir",   # LLVM IR  (common to both)
+    "*.ttgir",  # TritonGPU IR (common to both)
+    "*.ttir",   # Triton IR    (common to both)
+)
 
-def _collect_ptx(output_dir: Path) -> list[str]:
+
+def _collect_codegen(output_dir: Path) -> list[str]:
+    """Collect all text-based codegen artefacts from *output_dir*/triton_cache.
+
+    Returns one string per file, sorted by path, so lists from different runs
+    can be compared element-wise only when the same set of files was produced.
+    Uses a content-keyed dict to handle filename differences between runs.
+    """
     cache_dir = output_dir / "triton_cache"
     if not cache_dir.exists():
         return []
-    return [f.read_text(errors="replace") for f in sorted(cache_dir.rglob("*.ptx"))]
+    files: list[Path] = []
+    for pattern in _CODEGEN_SUFFIXES:
+        files.extend(cache_dir.rglob(pattern))
+    return [f.read_text(errors="replace") for f in sorted(files)]
 
 
 # ---------------------------------------------------------------------------
-# PTX mnemonic extraction (for --filter-by-ptx)
+# PTX mnemonic extraction (for --filter-by-ptx, NVIDIA only)
 # ---------------------------------------------------------------------------
 
 _PTX_INSTR_RE = re.compile(
@@ -234,9 +255,13 @@ _PTX_SKIP_CHARS = frozenset({".", "/", "$", "{", "}", "@"})
 
 
 def extract_ptx_mnemonics(baseline_dir: Path) -> frozenset[str]:
+    """Extract PTX instruction mnemonics from the baseline cache (NVIDIA only)."""
+    cache_dir = baseline_dir / "triton_cache"
+    if not cache_dir.exists():
+        return frozenset()
     mnemonics: set[str] = set()
-    for ptx_text in _collect_ptx(baseline_dir):
-        for line in ptx_text.splitlines():
+    for ptx_file in sorted(cache_dir.rglob("*.ptx")):
+        for line in ptx_file.read_text(errors="replace").splitlines():
             stripped = line.strip()
             if not stripped or stripped[0] in _PTX_SKIP_CHARS or stripped.endswith(":"):
                 continue
@@ -256,7 +281,10 @@ def _compare(
     baseline_dir: Path,
     flip_dir: Path,
 ) -> FlipResult:
-    """Compare a flip run against the baseline using stdout diff and PTX diff.
+    """Compare a flip run against the baseline using stdout and codegen diffs.
+
+    ``codegen_changed`` covers all text-based Triton cache artefacts: PTX
+    (NVIDIA), AMDGCN (AMD), and the shared LLVM IR / TTGIR / TTIR files.
 
     Crash detection uses the ``_done`` / ``_error.txt`` sentinels written by
     ``_wrapper.py`` and the saved ``returncode.txt``, not the GDB exit code
@@ -280,10 +308,13 @@ def _compare(
     script_ran = done_sentinel.exists() and not error_sentinel.exists()
     crashed = gdb_failed or not script_ran
 
-    # PTX diff
-    baseline_ptx = _collect_ptx(baseline_dir)
-    flip_ptx = _collect_ptx(flip_dir)
-    ptx_changed = bool(baseline_ptx) and bool(flip_ptx) and baseline_ptx != flip_ptx
+    # Codegen diff — backend-agnostic: PTX, AMDGCN, LLIR, TTGIR, TTIR
+    baseline_codegen = _collect_codegen(baseline_dir)
+    flip_codegen = _collect_codegen(flip_dir)
+    codegen_changed = (
+        bool(baseline_codegen) and bool(flip_codegen)
+        and baseline_codegen != flip_codegen
+    )
 
     # Stdout diff — only meaningful when the script actually ran
     stdout_changed = False
@@ -300,7 +331,7 @@ def _compare(
         crashed=crashed,
         timed_out=timed_out,
         script_ran=script_ran,
-        ptx_changed=ptx_changed,
+        codegen_changed=codegen_changed,
         stdout_changed=stdout_changed,
     )
 
@@ -321,7 +352,7 @@ def _serialise_result(r: FlipResult) -> dict:
         "crashed": r.crashed,
         "timed_out": r.timed_out,
         "script_ran": r.script_ran,
-        "ptx_changed": r.ptx_changed,
+        "codegen_changed": r.codegen_changed,
         "stdout_changed": r.stdout_changed,
     }
 
@@ -536,8 +567,8 @@ def run_flipper(
                 flags.append("TIMEOUT")
             elif result.crashed:
                 flags.append("CRASH" if not result.script_ran else "SCRIPT_FAILED")
-            if result.ptx_changed:
-                flags.append("PTX_DIFF")
+            if result.codegen_changed:
+                flags.append("CODEGEN_DIFF")
             if result.stdout_changed:
                 flags.append("STDOUT_DIFF")
 
