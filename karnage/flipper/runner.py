@@ -85,6 +85,7 @@ def _iter_patch_specs(
     tier_filter: int | None = None,
     type_filter: str | None = None,
     function_pattern: str | None = None,
+    function_names: frozenset[str] | None = None,
 ) -> Iterator[PatchSpec]:
     """Yield one :class:`~karnage.utils.models.PatchSpec` per flip site.
 
@@ -93,6 +94,10 @@ def _iter_patch_specs(
         tier_filter:      Only yield specs from functions of this tier.
         type_filter:      Only yield sites of this instruction type.
         function_pattern: Regex matched against the function's demangled name.
+        function_names:   Exact demangled names to include (e.g. loaded from a
+                          ``--function-list`` file).  When provided, only
+                          functions whose full name is in this set are yielded.
+                          Composed with *function_pattern* if both are given.
 
     Yields:
         :class:`~karnage.utils.models.PatchSpec` in function-name / site order.
@@ -103,6 +108,8 @@ def _iter_patch_specs(
     for func_name, fd in sites_data.get("functions", {}).items():
         tier = fd.get("tier", 3)
         if tier_filter is not None and tier != tier_filter:
+            continue
+        if function_names is not None and func_name not in function_names:
             continue
         if pat is not None and not pat.search(func_name):
             continue
@@ -437,6 +444,7 @@ def run_flipper(
     tier_filter: int | None = None,
     type_filter: str | None = None,
     function_pattern: str | None = None,
+    function_names: frozenset[str] | None = None,
     flip_timeout: float | None = None,
 ) -> list[FlipResult]:
     """Run the full bit-flip test suite and return all results.
@@ -467,6 +475,9 @@ def run_flipper(
         tier_filter:      Keep only specs from functions of this tier.
         type_filter:      Keep only sites of this instruction type.
         function_pattern: Regex filter on function name.
+        function_names:   Exact demangled function names to target (loaded from
+                          a ``--function-list`` file).  Composed with
+                          *function_pattern* if both are given.
         flip_timeout:     Per-flip GDB process timeout in seconds.
 
     Returns:
@@ -481,8 +492,19 @@ def run_flipper(
             tier_filter=tier_filter,
             type_filter=type_filter,
             function_pattern=function_pattern,
+            function_names=function_names,
         )
     )
+    if function_names is not None:
+        matched = len({s.func_name for s in specs})
+        missed = function_names - {s.func_name for s in specs}
+        logger.info(
+            f"Function list: {len(function_names)} requested, "
+            f"{matched} found in flip_sites.json, {len(missed)} not found"
+        )
+        if missed:
+            for name in sorted(missed):
+                logger.warning(f"  not in flip_sites.json: {name}")
     logger.info(f"Total specs before filtering: {len(specs):,}")
 
     # --- Baseline ---

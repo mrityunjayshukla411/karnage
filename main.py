@@ -132,6 +132,13 @@ def _cmd_flip(args: argparse.Namespace) -> None:
         if not path.exists():
             raise SystemExit(f"{flag}: not found: {path}")
 
+    function_names: frozenset[str] | None = None
+    if args.function_list is not None:
+        if not args.function_list.exists():
+            raise SystemExit(f"--function-list: not found: {args.function_list}")
+        lines = args.function_list.read_text().splitlines()
+        function_names = frozenset(l.strip() for l in lines if l.strip())
+
     run_flipper(
         triton_script=args.script,
         flip_sites_json=args.sites,
@@ -144,6 +151,7 @@ def _cmd_flip(args: argparse.Namespace) -> None:
         tier_filter=args.tier,
         type_filter=args.type,
         function_pattern=args.function,
+        function_names=function_names,
         flip_timeout=args.flip_timeout,
     )
 
@@ -335,6 +343,17 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATTERN",
         default=None,
         help="Regex filter applied to function demangled names",
+    )
+    p_flip.add_argument(
+        "--function-list",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a text file of exact demangled function names to target "
+            "(one per line). Only flip sites belonging to listed functions are run. "
+            "Can be combined with --function."
+        ),
     )
     p_flip.add_argument(
         "--filter-by-ptx",
