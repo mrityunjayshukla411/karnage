@@ -25,12 +25,14 @@ VMA arithmetic::
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterator
 
@@ -393,26 +395,40 @@ def _spec_from_dict(d: dict) -> PatchSpec:
 # ---------------------------------------------------------------------------
 
 
-def reconstruct_report(output_dir: Path) -> list[dict]:
-    """Reconstruct a JSON report from an existing flip output directory.
+def reconstruct_report(output_dir: Path) -> dict[str, list[dict]]:
+    """Reconstruct per-script JSON reports from an existing flip output directory.
 
     Scans all ``flip_NNNNNN/`` subdirectories, reads ``spec.json`` from each,
     and re-runs the comparison logic against the baseline directory.  Requires
     that the run was performed with a version of karnage that writes
     ``spec.json`` (i.e. this version or later).
 
+    Script names are auto-detected from subdirectories of ``baseline/`` that
+    contain an ``app_stdout.txt`` file.  Legacy single-script output dirs
+    (``app_stdout.txt`` directly inside ``baseline/``) are returned under the
+    key ``"baseline"``.
+
     Args:
         output_dir: Root output directory passed to ``karnage flip --output``.
 
     Returns:
-        List of serialised result dicts, the same format as ``--report`` JSON.
+        Dict mapping each script stem to its list of serialised result dicts.
     """
     baseline_dir = output_dir / "baseline"
     if not baseline_dir.exists():
         raise FileNotFoundError(f"baseline/ not found in {output_dir}")
 
+    script_names: list[str] = sorted(
+        d.name
+        for d in baseline_dir.iterdir()
+        if d.is_dir() and (d / "app_stdout.txt").exists()
+    )
+    legacy = not script_names and (baseline_dir / "app_stdout.txt").exists()
+
     flip_dirs = sorted(output_dir.glob("flip_*/"))
-    results: list[dict] = []
+    results: dict[str, list[dict]] = (
+        {"baseline": []} if legacy else {name: [] for name in script_names}
+    )
 
     for flip_dir in flip_dirs:
         spec_file = flip_dir / "spec.json"
@@ -420,10 +436,97 @@ def reconstruct_report(output_dir: Path) -> list[dict]:
             logger.warning(f"No spec.json in {flip_dir.name} — skipping")
             continue
         spec = _spec_from_dict(json.loads(spec_file.read_text()))
-        result = _compare(spec, baseline_dir, flip_dir)
-        results.append(_serialise_result(result))
+        if legacy:
+            results["baseline"].append(
+                _serialise_result(_compare(spec, baseline_dir, flip_dir))
+            )
+        else:
+            for name in script_names:
+                results[name].append(
+                    _serialise_result(
+                        _compare(spec, baseline_dir / name, flip_dir / name)
+                    )
+                )
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Per-flip worker (thread-safe)
+# ---------------------------------------------------------------------------
+
+
+def _flip_one(
+    spec: PatchSpec,
+    *,
+    triton_scripts: list[Path],
+    output_dir: Path,
+    flip_timeout: float | None,
+    baseline_dir: Path,
+) -> dict[str, FlipResult]:
+    """Run one bit-flip experiment across all scripts and return per-script results.
+
+    Safe to call from multiple threads simultaneously; every flip gets its own
+    subdirectory so there is no shared mutable state between concurrent calls.
+    Each script runs in its own ``flip_NNNNNN/{script.stem}/`` subdir so
+    Triton caches and sentinel files never collide.
+
+    Returns:
+        Dict mapping ``script.stem`` to its :class:`~karnage.utils.models.FlipResult`.
+    """
+    flip_dir = output_dir / f"flip_{spec.flip_id:06d}"
+    flip_dir.mkdir(parents=True, exist_ok=True)
+    patch_spec_path = flip_dir / "patch_spec.json"
+    patch_spec_path.write_text(
+        json.dumps({"patch_vmas": [spec.site_vma], "mask": spec.flip_mask}, indent=2)
+    )
+    (flip_dir / "spec.json").write_text(json.dumps(_spec_to_dict(spec), indent=2))
+    results: dict[str, FlipResult] = {}
+    for script in triton_scripts:
+        _run_inferior(
+            script,
+            flip_dir / script.stem,
+            patch_spec_path=patch_spec_path,
+            timeout=flip_timeout,
+        )
+        results[script.stem] = _compare(spec, baseline_dir / script.stem, flip_dir / script.stem)
+    return results
+
+
+def _log_result(per_script: dict[str, FlipResult]) -> None:
+    """Emit the one-line per-flip summary to the logger.
+
+    Shows a compact per-script outcome so interesting scripts stand out:
+    ``softmax[STDOUT_DIFF,CODEGEN_DIFF] matmul[ok] layernorm[CRASH]``
+    """
+    spec = next(iter(per_script.values())).spec
+    short_fn = spec.func_name.split("::")[-1][:30]
+    parts: list[str] = []
+    for stem, result in per_script.items():
+        flags: list[str] = []
+        if result.timed_out:
+            flags.append("TIMEOUT")
+        elif result.crashed:
+            flags.append("CRASH" if not result.script_ran else "SCRIPT_FAILED")
+        if result.codegen_changed:
+            flags.append("CODEGEN_DIFF")
+        if result.stdout_changed:
+            flags.append("STDOUT_DIFF")
+        parts.append(f"{stem}[{','.join(flags) if flags else 'ok'}]")
+    logger.info(
+        f"[{spec.flip_id:>6}] {short_fn}  "
+        f"0x{spec.site_vma:x}  {spec.instr_type}  "
+        f"{spec.opcode_before}→{spec.opcode_after}  → {' '.join(parts)}"
+    )
+
+
+def _iter_batches(lst: list, size: int) -> Iterator[list]:
+    """Yield successive *size*-sized sublists. ``size <= 0`` yields one batch."""
+    if size <= 0:
+        yield lst
+    else:
+        for i in range(0, len(lst), size):
+            yield lst[i : i + size]
 
 
 # ---------------------------------------------------------------------------
@@ -432,12 +535,12 @@ def reconstruct_report(output_dir: Path) -> list[dict]:
 
 
 def run_flipper(
-    triton_script: Path,
+    triton_scripts: list[Path],
     flip_sites_json: Path,
     output_dir: Path,
     *,
     max_flips: int | None = None,
-    report_json: Path | None = None,
+    report_dir: Path | None = None,
     cooldown_every: int = 0,
     cooldown_secs: float = 30.0,
     filter_by_ptx: bool = False,
@@ -446,6 +549,7 @@ def run_flipper(
     function_pattern: str | None = None,
     function_names: frozenset[str] | None = None,
     flip_timeout: float | None = None,
+    workers: int = 1,
 ) -> list[FlipResult]:
     """Run the full bit-flip test suite and return all results.
 
@@ -463,11 +567,17 @@ def run_flipper(
     even if ``--report`` was not passed.
 
     Args:
-        triton_script:    Path to the Triton application script.
+        triton_scripts:   One or more Triton application scripts.  Every script
+                          is run for *each* flip; results are aggregated with
+                          ``any()`` so a flip is flagged if it affects at least
+                          one script.  Each script runs in its own subdir
+                          (``flip_NNNNNN/{script.stem}/``) so Triton caches
+                          never collide.
         flip_sites_json:  Path to ``flip_sites.json`` from the scan step.
         output_dir:       Root output directory for per-flip subdirectories.
         max_flips:        Stop after this many flips; ``None`` runs all.
-        report_json:      Write a JSON array of serialised results here.
+        report_dir:       Directory to write one ``{stem}.json`` report per
+                          script.  Created if it does not exist.
         cooldown_every:   Pause after every *N* flips (0 = disabled).
         cooldown_secs:    Duration of each cooldown pause in seconds.
         filter_by_ptx:    Keep only specs whose mnemonic root appears in
@@ -479,9 +589,16 @@ def run_flipper(
                           a ``--function-list`` file).  Composed with
                           *function_pattern* if both are given.
         flip_timeout:     Per-flip GDB process timeout in seconds.
+        workers:          Number of concurrent GDB flip processes.  Each flip
+                          gets its own output directory and Triton cache so
+                          there is no shared state between workers.  Cooldown
+                          is applied between batches of ``cooldown_every``
+                          completed flips.  Results are sorted by ``flip_id``
+                          before being returned regardless of completion order.
 
     Returns:
-        List of :class:`~karnage.utils.models.FlipResult` objects.
+        Dict mapping each script stem to its list of
+        :class:`~karnage.utils.models.FlipResult` objects.
     """
     output_dir = output_dir.resolve()
     sites_data = _load_json(flip_sites_json)
@@ -509,13 +626,22 @@ def run_flipper(
 
     # --- Baseline ---
     baseline_dir = output_dir / "baseline"
-    logger.info("Running baseline (no patch)...")
-    if not _run_inferior(triton_script, baseline_dir):
-        logger.warning("Baseline run failed --- see baseline/gdb_stderr.txt")
+    logger.info(
+        f"Running baseline ({len(triton_scripts)} script(s), no patch)..."
+    )
+    for script in triton_scripts:
+        script_baseline = baseline_dir / script.stem
+        if not _run_inferior(script, script_baseline):
+            logger.warning(
+                f"Baseline run failed for {script.name} "
+                f"--- see {script_baseline}/gdb_stderr.txt"
+            )
 
     # --- PTX relevance filter ---
     if filter_by_ptx:
-        ptx_mnemonics = extract_ptx_mnemonics(baseline_dir)
+        ptx_mnemonics: frozenset[str] = frozenset()
+        for script in triton_scripts:
+            ptx_mnemonics |= extract_ptx_mnemonics(baseline_dir / script.stem)
         if not ptx_mnemonics:
             logger.warning(
                 "Relevance filter requested but no PTX files found in baseline --- "
@@ -538,7 +664,16 @@ def run_flipper(
     logger.info(f"Flips to run: {len(specs):,}")
 
     # --- Flip runs ---
-    results: list[FlipResult] = []
+    results: dict[str, list[FlipResult]] = {s.stem: [] for s in triton_scripts}
+    flip_fn = functools.partial(
+        _flip_one,
+        triton_scripts=triton_scripts,
+        output_dir=output_dir,
+        flip_timeout=flip_timeout,
+        baseline_dir=baseline_dir,
+    )
+    desc_suffix = f" ({workers} workers)" if workers > 1 else ""
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -549,70 +684,60 @@ def run_flipper(
         console=console,
         transient=False,
     ) as progress:
-        task = progress.add_task("Running flips", total=len(specs))
-        for spec in specs:
-            short_fn = spec.func_name.split("::")[-1][:30]
-            progress.update(
-                task,
-                description=(
-                    f"[cyan]{short_fn}[/cyan] "
-                    f"[dim]{spec.opcode_before}→{spec.opcode_after}[/dim]"
-                ),
-            )
+        task = progress.add_task(f"Running flips{desc_suffix}", total=len(specs))
 
-            flip_dir = output_dir / f"flip_{spec.flip_id:06d}"
-            flip_dir.mkdir(parents=True, exist_ok=True)
-
-            # patch_spec.json --- consumed by _gdb_script.py
-            (flip_dir / "patch_spec.json").write_text(
-                json.dumps(
-                    {"patch_vmas": [spec.site_vma], "mask": spec.flip_mask},
-                    indent=2,
-                )
-            )
-            # spec.json --- full PatchSpec for retroactive report reconstruction
-            (flip_dir / "spec.json").write_text(
-                json.dumps(_spec_to_dict(spec), indent=2)
-            )
-
-            _run_inferior(
-                triton_script,
-                flip_dir,
-                patch_spec_path=flip_dir / "patch_spec.json",
-                timeout=flip_timeout,
-            )
-            result = _compare(spec, baseline_dir, flip_dir)
-            results.append(result)
-
-            flags = []
-            if result.timed_out:
-                flags.append("TIMEOUT")
-            elif result.crashed:
-                flags.append("CRASH" if not result.script_ran else "SCRIPT_FAILED")
-            if result.codegen_changed:
-                flags.append("CODEGEN_DIFF")
-            if result.stdout_changed:
-                flags.append("STDOUT_DIFF")
-
-            outcome = ", ".join(flags) if flags else "no change"
-            logger.info(
-                f"[{spec.flip_id:>6}] {short_fn}  "
-                f"0x{spec.site_vma:x}  {spec.instr_type}  "
-                f"{spec.opcode_before}→{spec.opcode_after}  → {outcome}"
-            )
-            progress.advance(task)
-
-            flips_done = len(results)
-            if cooldown_every > 0 and flips_done % cooldown_every == 0:
+        first_batch = True
+        for batch in _iter_batches(specs, cooldown_every):
+            if not first_batch and cooldown_every > 0:
                 logger.info(
-                    f"[cooldown] {flips_done} flips done --- "
+                    f"[cooldown] {len(results)} flips done --- "
                     f"sleeping {cooldown_secs:.0f}s..."
                 )
                 time.sleep(cooldown_secs)
+            first_batch = False
 
-    if report_json:
-        with report_json.open("w") as f:
-            json.dump([_serialise_result(r) for r in results], f, indent=2)
-        logger.success(f"Report written → {report_json}")
+            if workers == 1:
+                for spec in batch:
+                    short_fn = spec.func_name.split("::")[-1][:30]
+                    progress.update(
+                        task,
+                        description=(
+                            f"[cyan]{short_fn}[/cyan] "
+                            f"[dim]{spec.opcode_before}→{spec.opcode_after}[/dim]"
+                        ),
+                    )
+                    per_script = flip_fn(spec)
+                    _log_result(per_script)
+                    for stem, r in per_script.items():
+                        results[stem].append(r)
+                    progress.advance(task)
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {pool.submit(flip_fn, spec): spec for spec in batch}
+                    for future in as_completed(futures):
+                        per_script = future.result()
+                        _log_result(per_script)
+                        for stem, r in per_script.items():
+                            results[stem].append(r)
+                        progress.advance(task)
+
+    # Parallel completion order is nondeterministic; sort each script's list.
+    for stem in results:
+        results[stem].sort(key=lambda r: r.spec.flip_id)
+
+    if report_dir:
+        report_dir.mkdir(parents=True, exist_ok=True)
+        for stem, script_results in results.items():
+            report_path = report_dir / f"{stem}.json"
+            with report_path.open("w") as f:
+                json.dump([_serialise_result(r) for r in script_results], f, indent=2)
+            crashed = sum(1 for r in script_results if r.crashed)
+            codegen = sum(1 for r in script_results if r.codegen_changed)
+            stdout = sum(1 for r in script_results if r.stdout_changed)
+            logger.success(
+                f"{stem}: {len(script_results)} flips — "
+                f"{crashed} crashed, {codegen} codegen diff, {stdout} stdout diff "
+                f"→ {report_path}"
+            )
 
     return results

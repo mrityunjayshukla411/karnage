@@ -22,9 +22,16 @@ Quick start
   # Step 1a - preview discovered functions without writing JSON
   python main.py scan --library /path/to/libtriton.so --list
 
-  # Step 2 - run bit-flip tests (Tier-1 functions, max 20 flips)
-  python main.py flip --script matmul.py --library /path/to/libtriton.so \\
-      --tier 1 --max-flips 20 --report results.json
+  # Step 2 - run bit-flip tests across all kernels
+  python main.py flip \\
+      --script triton_kernels/*.py \\
+      --library /path/to/libtriton.so \\
+      --function-list common_high_level_functions_amd_nvidia.txt \\
+      --workers 8 \\
+      --flip-timeout 120 \\
+      --cooldown-every 100 --cooldown-secs 300 \\
+      --output test_results/ \\
+      --report reports/run_01/
 
   # Step 3 - rebuild report from an existing output dir (if --report was omitted)
   python main.py report --output test_results/ --report results.json
@@ -124,8 +131,10 @@ def _cmd_flip(args: argparse.Namespace) -> None:
     Args:
         args: Parsed CLI arguments for the ``flip`` subcommand.
     """
+    for path in args.script:
+        if not path.exists():
+            raise SystemExit(f"--script: not found: {path}")
     for path, flag in [
-        (args.script, "--script"),
         (args.sites, "--sites"),
         (args.library, "--library"),
     ]:
@@ -140,11 +149,11 @@ def _cmd_flip(args: argparse.Namespace) -> None:
         function_names = frozenset(l.strip() for l in lines if l.strip())
 
     run_flipper(
-        triton_script=args.script,
+        triton_scripts=args.script,
         flip_sites_json=args.sites,
         output_dir=args.output,
         max_flips=args.max_flips,
-        report_json=args.report,
+        report_dir=args.report,
         cooldown_every=args.cooldown_every,
         cooldown_secs=args.cooldown_secs,
         filter_by_ptx=args.filter_by_ptx,
@@ -153,6 +162,7 @@ def _cmd_flip(args: argparse.Namespace) -> None:
         function_pattern=args.function,
         function_names=function_names,
         flip_timeout=args.flip_timeout,
+        workers=args.workers,
     )
 
 
@@ -162,10 +172,11 @@ def _cmd_flip(args: argparse.Namespace) -> None:
 
 
 def _cmd_report(args: argparse.Namespace) -> None:
-    """Reconstruct a JSON report from an existing flip output directory.
+    """Reconstruct per-script JSON reports from an existing flip output directory.
 
     Reads ``spec.json`` from every ``flip_NNNNNN/`` subdirectory, re-runs the
-    stdout and PTX comparison against the baseline, and writes the report.
+    stdout and codegen comparison against the baseline, and writes one
+    ``{script_stem}.json`` file per script into ``--report DIR``.
 
     Args:
         args: Parsed CLI arguments for the ``report`` subcommand.
@@ -183,17 +194,19 @@ def _cmd_report(args: argparse.Namespace) -> None:
     except FileNotFoundError as exc:
         raise SystemExit(str(exc)) from exc
 
-    with args.report.open("w") as f:
-        json.dump(results, f, indent=2)
-
-    crashed = sum(1 for r in results if r["crashed"])
-    codegen_changed = sum(1 for r in results if r["codegen_changed"])
-    stdout_changed = sum(1 for r in results if r["stdout_changed"])
-    logger.success(
-        f"Report: {len(results)} flips reconstructed — "
-        f"{crashed} crashed, {codegen_changed} codegen diff, {stdout_changed} stdout diff "
-        f"→ {args.report}"
-    )
+    args.report.mkdir(parents=True, exist_ok=True)
+    for stem, script_results in results.items():
+        report_path = args.report / f"{stem}.json"
+        with report_path.open("w") as f:
+            json.dump(script_results, f, indent=2)
+        crashed = sum(1 for r in script_results if r["crashed"])
+        codegen_changed = sum(1 for r in script_results if r["codegen_changed"])
+        stdout_changed = sum(1 for r in script_results if r["stdout_changed"])
+        logger.success(
+            f"{stem}: {len(script_results)} flips — "
+            f"{crashed} crashed, {codegen_changed} codegen diff, {stdout_changed} stdout diff "
+            f"→ {report_path}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +296,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--script",
         type=Path,
         required=True,
-        help="Triton application script to test (e.g. matmul.py)",
+        nargs="+",
+        metavar="PATH",
+        help=(
+            "Triton application script(s) to test.  Pass multiple paths to run "
+            "all scripts for every flip; results are aggregated (a flip is flagged "
+            "if it affects any script).  Example: --script a.py b.py c.py"
+        ),
     )
     p_flip.add_argument(
         "--library",
@@ -316,8 +335,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--report",
         type=Path,
         default=None,
-        metavar="PATH",
-        help="Write a JSON array of all flip results to this path",
+        metavar="DIR",
+        help=(
+            "Directory to write per-script JSON reports into.  "
+            "One file per script is created: ``{DIR}/{script_stem}.json``.  "
+            "Created if it does not exist."
+        ),
     )
     p_flip.add_argument(
         "--tier",
@@ -381,6 +404,18 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="S",
         help="Seconds to sleep during each cooldown pause (default: 30)",
     )
+    p_flip.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Number of concurrent GDB flip processes (default: 1). "
+            "Each worker gets its own output directory and Triton cache. "
+            "GPU memory is the practical limit: ~200-600 MB per worker. "
+            "Cooldown is applied between batches of --cooldown-every flips."
+        ),
+    )
     p_flip.set_defaults(func=_cmd_flip)
 
     # -- report --
@@ -404,8 +439,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--report",
         type=Path,
         required=True,
-        metavar="PATH",
-        help="Destination path for the reconstructed JSON report",
+        metavar="DIR",
+        help=(
+            "Directory to write reconstructed reports into.  "
+            "One ``{script_stem}.json`` is written per script detected in the output dir."
+        ),
     )
     p_report.set_defaults(func=_cmd_report)
 
