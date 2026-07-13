@@ -48,11 +48,14 @@ from rich.progress import (
 
 from karnage.utils.constants import (
     ENV_ALWAYS_COMPILE,
+    ENV_COMPILE_ONLY,
     ENV_OUTPUT_DIR,
     ENV_PATCH_SPEC,
+    ENV_SIGNATURE_IN,
+    ENV_SIGNATURE_OUT,
     ENV_TRITON_CACHE,
 )
-from karnage.utils.exceptions import ScannerError
+from karnage.utils.exceptions import FlipperError, ScannerError
 from karnage.utils.logger import console, logger
 from karnage.utils.models import FlipResult, PatchSpec
 
@@ -81,13 +84,14 @@ def _load_json(path: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _iter_patch_specs(
+def iter_patch_specs(
     sites_data: dict,
     *,
     tier_filter: int | None = None,
     type_filter: str | None = None,
     function_pattern: str | None = None,
     function_names: frozenset[str] | None = None,
+    flip_ids: frozenset[int] | None = None,
 ) -> Iterator[PatchSpec]:
     """Yield one :class:`~karnage.utils.models.PatchSpec` per flip site.
 
@@ -100,6 +104,17 @@ def _iter_patch_specs(
                           ``--function-list`` file).  When provided, only
                           functions whose full name is in this set are yielded.
                           Composed with *function_pattern* if both are given.
+        flip_ids:         Exact ``flip_id`` values to include (e.g. loaded from
+                          a ``--flip-ids-file``, typically the pruned candidate
+                          list from a ``--compile-only`` prescreen run). Unlike
+                          the other filters, this one doesn't change which
+                          sites consume a ``flip_id`` --- it only restricts
+                          which already-numbered sites get yielded --- so IDs
+                          from a prior call line up correctly here as long as
+                          *tier_filter* / *type_filter* / *function_pattern* /
+                          *function_names* are identical between the two
+                          calls (those still shift the numbering, same as
+                          before this filter existed).
 
     Yields:
         :class:`~karnage.utils.models.PatchSpec` in function-name / site order.
@@ -119,8 +134,12 @@ def _iter_patch_specs(
         for site in fd.get("sites", []):
             if type_filter is not None and site["instr_type"] != type_filter:
                 continue
+            this_flip_id = flip_id
+            flip_id += 1
+            if flip_ids is not None and this_flip_id not in flip_ids:
+                continue
             yield PatchSpec(
-                flip_id=flip_id,
+                flip_id=this_flip_id,
                 func_name=func_name,
                 site_vma=int(site["site_vma"], 16),
                 instr_type=site["instr_type"],
@@ -128,7 +147,6 @@ def _iter_patch_specs(
                 opcode_after=site["opcode_after"],
                 flip_mask=int(site["flip_mask"], 16),
             )
-            flip_id += 1
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +160,9 @@ def _run_inferior(
     *,
     patch_spec_path: Path | None = None,
     timeout: float | None = None,
+    compile_only: bool = False,
+    signature_out: Path | None = None,
+    signature_in: Path | None = None,
 ) -> bool:
     """Run the Triton script, optionally under GDB with a patch applied.
 
@@ -162,6 +183,17 @@ def _run_inferior(
         output_dir:      Directory to write output files into.
         patch_spec_path: Path to ``patch_spec.json``; ``None`` for baseline.
         timeout:         SIGTERM the GDB process after this many seconds.
+        compile_only:    Set ``KARNAGE_COMPILE_ONLY=1`` so ``_wrapper.py``
+                         patches Triton to compile every kernel without
+                         launching it on the GPU --- see ``_wrapper.py``'s
+                         module docstring for the full mechanism.
+        signature_out:   Write a kernel-call signature manifest here (the
+                         baseline run only) --- mutually exclusive with
+                         *signature_in*. See ``_wrapper.py``'s "Signature
+                         capture / replay" docs.
+        signature_in:    Replay recorded kernel calls from this manifest
+                         instead of running *triton_script* at all ---
+                         mutually exclusive with *signature_out*.
 
     Returns:
         ``True`` if the process exited with code 0.
@@ -172,6 +204,12 @@ def _run_inferior(
     env[ENV_OUTPUT_DIR] = str(output_dir)          # sentinels land here directly
     env[ENV_TRITON_CACHE] = str(output_dir / "triton_cache")
     env[ENV_ALWAYS_COMPILE] = "1"
+    if compile_only:
+        env[ENV_COMPILE_ONLY] = "1"
+    if signature_out is not None:
+        env[ENV_SIGNATURE_OUT] = str(signature_out)
+    if signature_in is not None:
+        env[ENV_SIGNATURE_IN] = str(signature_in)
 
     if patch_spec_path is None:
         cmd = [sys.executable, str(_WRAPPER), str(triton_script)]
@@ -289,6 +327,8 @@ def _compare(
     spec: PatchSpec,
     baseline_dir: Path,
     flip_dir: Path,
+    *,
+    compile_only: bool = False,
 ) -> FlipResult:
     """Compare a flip run against the baseline using stdout and codegen diffs.
 
@@ -303,6 +343,10 @@ def _compare(
         spec:         The :class:`~karnage.utils.models.PatchSpec` applied.
         baseline_dir: Output directory of the clean baseline run.
         flip_dir:     Output directory of this flip run.
+        compile_only: Skip the stdout diff --- in compile-only mode the
+                     kernel never launches, so its output (and anything the
+                     script prints from it) is never meaningfully computed;
+                     ``stdout_changed`` is always ``False`` for these runs.
 
     Returns:
         Populated :class:`~karnage.utils.models.FlipResult`.
@@ -325,9 +369,10 @@ def _compare(
         and baseline_codegen != flip_codegen
     )
 
-    # Stdout diff — only meaningful when the script actually ran
+    # Stdout diff — only meaningful when the script actually ran and its
+    # kernel actually launched (never true in compile-only mode)
     stdout_changed = False
-    if not crashed and not timed_out:
+    if not compile_only and not crashed and not timed_out:
         b_out = baseline_dir / "app_stdout.txt"
         f_out = flip_dir / "app_stdout.txt"
         if b_out.exists() and f_out.exists():
@@ -463,6 +508,8 @@ def _flip_one(
     output_dir: Path,
     flip_timeout: float | None,
     baseline_dir: Path,
+    compile_only: bool = False,
+    replay_signatures: bool = False,
 ) -> dict[str, FlipResult]:
     """Run one bit-flip experiment across all scripts and return per-script results.
 
@@ -470,6 +517,16 @@ def _flip_one(
     subdirectory so there is no shared mutable state between concurrent calls.
     Each script runs in its own ``flip_NNNNNN/{script.stem}/`` subdir so
     Triton caches and sentinel files never collide.
+
+    Args:
+        compile_only:      Forwarded to :func:`_run_inferior` (skip the GPU
+                           launch) and :func:`_compare` (skip the now-
+                           meaningless stdout diff).
+        replay_signatures: Replay from ``<baseline_dir>/<script.stem>/
+                           signatures.json`` (written by the baseline run;
+                           see :func:`run_flipper`) instead of running
+                           *script* at all --- no torch/CUDA touch beyond
+                           what ``triton.compile()`` itself needs.
 
     Returns:
         Dict mapping ``script.stem`` to its :class:`~karnage.utils.models.FlipResult`.
@@ -483,13 +540,25 @@ def _flip_one(
     (flip_dir / "spec.json").write_text(json.dumps(_spec_to_dict(spec), indent=2))
     results: dict[str, FlipResult] = {}
     for script in triton_scripts:
+        signature_in = (
+            baseline_dir / script.stem / "signatures.json"
+            if replay_signatures
+            else None
+        )
         _run_inferior(
             script,
             flip_dir / script.stem,
             patch_spec_path=patch_spec_path,
             timeout=flip_timeout,
+            compile_only=compile_only,
+            signature_in=signature_in,
         )
-        results[script.stem] = _compare(spec, baseline_dir / script.stem, flip_dir / script.stem)
+        results[script.stem] = _compare(
+            spec,
+            baseline_dir / script.stem,
+            flip_dir / script.stem,
+            compile_only=compile_only,
+        )
     return results
 
 
@@ -548,8 +617,11 @@ def run_flipper(
     type_filter: str | None = None,
     function_pattern: str | None = None,
     function_names: frozenset[str] | None = None,
+    flip_ids: frozenset[int] | None = None,
     flip_timeout: float | None = None,
     workers: int = 1,
+    compile_only: bool = False,
+    replay_signatures: bool = False,
 ) -> list[FlipResult]:
     """Run the full bit-flip test suite and return all results.
 
@@ -557,7 +629,7 @@ def run_flipper(
 
     1. Load ``flip_sites.json`` and build :class:`~karnage.utils.models.PatchSpec` list.
     2. Run a clean baseline (no GDB, no patch).
-    3. Apply optional filters (tier, type, function name, PTX relevance).
+    3. Apply optional filters (tier, type, function name, flip ID, PTX relevance).
     4. For each spec: write ``patch_spec.json`` + ``spec.json``, spawn GDB,
        diff stdout and PTX against the baseline.
     5. Optionally write a JSON report.
@@ -588,6 +660,12 @@ def run_flipper(
         function_names:   Exact demangled function names to target (loaded from
                           a ``--function-list`` file).  Composed with
                           *function_pattern* if both are given.
+        flip_ids:         Exact ``flip_id`` values to target (loaded from a
+                          ``--flip-ids-file``), typically the pruned candidate
+                          list from a prior ``compile_only=True`` run. Requires
+                          *tier_filter* / *type_filter* / *function_pattern* /
+                          *function_names* to match the run that produced
+                          those IDs --- see :func:`iter_patch_specs`.
         flip_timeout:     Per-flip GDB process timeout in seconds.
         workers:          Number of concurrent GDB flip processes.  Each flip
                           gets its own output directory and Triton cache so
@@ -595,21 +673,53 @@ def run_flipper(
                           is applied between batches of ``cooldown_every``
                           completed flips.  Results are sorted by ``flip_id``
                           before being returned regardless of completion order.
+                          In ``compile_only`` mode, GPU memory/execution
+                          contention no longer bounds concurrency (no kernel
+                          ever launches), so this can safely go much higher ---
+                          the practical ceiling becomes CPU cores / host RAM
+                          and the smaller per-worker GPU memory still needed
+                          for CUDA context + input tensor allocation.
+        compile_only:     Patch Triton (via ``KARNAGE_COMPILE_ONLY``, see
+                          ``_wrapper.py``) so every kernel compiles but never
+                          launches on the GPU. ``codegen_changed`` is still
+                          fully meaningful; ``stdout_changed`` is always
+                          ``False`` (the kernel's output is never computed).
+                          GDB still applies the bit-flip exactly as normal ---
+                          only the wrapped script's behavior changes.
+        replay_signatures: Requires ``compile_only=True``. The baseline run
+                          additionally records a kernel-call signature
+                          manifest (``<baseline_dir>/<script.stem>/
+                          signatures.json``); every flip then replays those
+                          recorded calls directly instead of running
+                          *triton_scripts* at all --- no torch/CUDA touch
+                          beyond what ``triton.compile()`` itself needs.
+                          Requires each script to gate its kernel-launching
+                          code behind ``if __name__ == "__main__":`` (checked
+                          by ``_wrapper.py`` during the baseline run; fails
+                          fast with a clear message otherwise). See
+                          ``_wrapper.py``'s "Signature capture / replay" docs.
 
     Returns:
         Dict mapping each script stem to its list of
         :class:`~karnage.utils.models.FlipResult` objects.
     """
+    if replay_signatures and not compile_only:
+        raise FlipperError(
+            "replay_signatures requires compile_only=True (--replay-signatures "
+            "requires --compile-only)"
+        )
+
     output_dir = output_dir.resolve()
     sites_data = _load_json(flip_sites_json)
 
     specs = list(
-        _iter_patch_specs(
+        iter_patch_specs(
             sites_data,
             tier_filter=tier_filter,
             type_filter=type_filter,
             function_pattern=function_pattern,
             function_names=function_names,
+            flip_ids=flip_ids,
         )
     )
     if function_names is not None:
@@ -622,7 +732,28 @@ def run_flipper(
         if missed:
             for name in sorted(missed):
                 logger.warning(f"  not in flip_sites.json: {name}")
+    if flip_ids is not None:
+        found = {s.flip_id for s in specs}
+        missed_ids = flip_ids - found
+        logger.info(
+            f"Flip ID list: {len(flip_ids)} requested, "
+            f"{len(found)} found, {len(missed_ids)} not found"
+        )
+        if missed_ids:
+            logger.warning(
+                f"  not found (check --tier/--type/--function match the "
+                f"run that produced these IDs): {sorted(missed_ids)[:20]}"
+                + (" ..." if len(missed_ids) > 20 else "")
+            )
     logger.info(f"Total specs before filtering: {len(specs):,}")
+
+    if compile_only:
+        logger.info("Compile-only mode: kernels compile but never launch on the GPU")
+    if replay_signatures:
+        logger.info(
+            "Replay-signatures mode: baseline captures kernel-call signatures once; "
+            "every flip replays them directly, with no app/torch/CUDA touch"
+        )
 
     # --- Baseline ---
     baseline_dir = output_dir / "baseline"
@@ -631,7 +762,15 @@ def run_flipper(
     )
     for script in triton_scripts:
         script_baseline = baseline_dir / script.stem
-        if not _run_inferior(script, script_baseline):
+        signature_out = (
+            script_baseline / "signatures.json" if replay_signatures else None
+        )
+        if not _run_inferior(
+            script,
+            script_baseline,
+            compile_only=compile_only,
+            signature_out=signature_out,
+        ):
             logger.warning(
                 f"Baseline run failed for {script.name} "
                 f"--- see {script_baseline}/gdb_stderr.txt"
@@ -671,6 +810,8 @@ def run_flipper(
         output_dir=output_dir,
         flip_timeout=flip_timeout,
         baseline_dir=baseline_dir,
+        compile_only=compile_only,
+        replay_signatures=replay_signatures,
     )
     desc_suffix = f" ({workers} workers)" if workers > 1 else ""
 

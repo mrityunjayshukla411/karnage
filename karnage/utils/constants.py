@@ -33,6 +33,19 @@ ENV_TRITON_CACHE = "TRITON_CACHE_DIR"
 ENV_ALWAYS_COMPILE = "TRITON_ALWAYS_COMPILE"
 """Forces Triton to recompile on every run; set to ``"1"`` by ``runner.py``."""
 
+ENV_COMPILE_ONLY = "KARNAGE_COMPILE_ONLY"
+"""When set to ``"1"``, ``_wrapper.py`` patches Triton so kernels compile but
+never launch on the GPU --- see the module docstring in ``_wrapper.py``."""
+
+ENV_SIGNATURE_OUT = "KARNAGE_SIGNATURE_OUT"
+"""Path to write a kernel-call signature manifest during the baseline
+compile-only run --- see the "Signature capture / replay" section of
+``_wrapper.py``'s module docstring."""
+
+ENV_SIGNATURE_IN = "KARNAGE_SIGNATURE_IN"
+"""Path to a signature manifest to replay instead of running the target
+script --- mutually exclusive with ``ENV_SIGNATURE_OUT``."""
+
 # ---------------------------------------------------------------------------
 # Default names / paths used by the CLI
 # ---------------------------------------------------------------------------

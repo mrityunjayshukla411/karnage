@@ -10,9 +10,18 @@ Subcommands
 
   flip    Run GDB-based bit-flip tests using flip_sites.json and compare
           generated PTX and application stdout against a clean baseline.
+          --compile-only runs a fast GPU-launch-free prescreen (kernels
+          compile but never run) to prune the candidate list by codegen
+          change alone before the expensive full run.
 
   report  Reconstruct a JSON report from an existing output directory.
           Use this when you forgot --report during a flip run.
+
+  perf    Measure the performance impact of codegen-changed, non-crashed
+          flips from a flip report using ncu. Since profiling is itself a
+          real execution, it also measures the real stdout_changed as a
+          side effect (the input report's stdout_changed is ignored, since
+          it's never meaningful from a --compile-only prescreen).
 
 Quick start
 -----------
@@ -33,8 +42,31 @@ Quick start
       --output test_results/ \\
       --report reports/run_01/
 
+  # Step 2a (optional) - fast GPU-launch-free prescreen to prune candidates
+  # by codegen change alone, then restrict the real Step 2 run to survivors
+  python main.py flip --compile-only --workers 64 \\
+      --script triton_kernels/vector_add.py \\
+      --library /path/to/libtriton.so \\
+      --output prescreen/ --report prescreen_reports/
+  # (filter prescreen_reports/*.json for codegen_changed=True flip_ids,
+  #  write them one per line to pruned_ids.txt)
+  python main.py flip --flip-ids-file pruned_ids.txt --workers 8 \\
+      --script triton_kernels/vector_add.py \\
+      --library /path/to/libtriton.so \\
+      --output test_results/ --report reports/run_01/
+
   # Step 3 - rebuild report from an existing output dir (if --report was omitted)
   python main.py report --output test_results/ --report results.json
+
+  # Step 4 - measure performance impact of codegen-changed, non-crashed
+  # flips using ncu (also measures the real stdout_changed for free)
+  python main.py perf \\
+      --report reports/run_01/vector_add.json \\
+      --script triton_kernels/vector_add.py \\
+      --library /path/to/libtriton.so \\
+      --sites flip_sites.json \\
+      --kernel-name vector_add_kernel \\
+      --output perf_results/
 """
 
 import argparse
@@ -43,6 +75,7 @@ from pathlib import Path
 
 from karnage.flipper import run_flipper
 from karnage.flipper.runner import reconstruct_report
+from karnage.perf import run_perf
 from karnage.scanner import scan_binary
 from karnage.scanner.scanner import scan_result_to_dict
 from karnage.utils.constants import DEFAULT_FLIP_SITES, DEFAULT_OUTPUT_DIR
@@ -148,6 +181,21 @@ def _cmd_flip(args: argparse.Namespace) -> None:
         lines = args.function_list.read_text().splitlines()
         function_names = frozenset(l.strip() for l in lines if l.strip())
 
+    flip_ids: frozenset[int] | None = None
+    if args.flip_ids_file is not None:
+        if not args.flip_ids_file.exists():
+            raise SystemExit(f"--flip-ids-file: not found: {args.flip_ids_file}")
+        lines = args.flip_ids_file.read_text().splitlines()
+        try:
+            flip_ids = frozenset(int(line.strip()) for line in lines if line.strip())
+        except ValueError as exc:
+            raise SystemExit(
+                f"--flip-ids-file: expected one integer flip_id per line: {exc}"
+            ) from exc
+
+    if args.replay_signatures and not args.compile_only:
+        raise SystemExit("--replay-signatures requires --compile-only")
+
     run_flipper(
         triton_scripts=args.script,
         flip_sites_json=args.sites,
@@ -161,8 +209,11 @@ def _cmd_flip(args: argparse.Namespace) -> None:
         type_filter=args.type,
         function_pattern=args.function,
         function_names=function_names,
+        flip_ids=flip_ids,
         flip_timeout=args.flip_timeout,
         workers=args.workers,
+        compile_only=args.compile_only,
+        replay_signatures=args.replay_signatures,
     )
 
 
@@ -207,6 +258,42 @@ def _cmd_report(args: argparse.Namespace) -> None:
             f"{crashed} crashed, {codegen_changed} codegen diff, {stdout_changed} stdout diff "
             f"→ {report_path}"
         )
+
+
+# ---------------------------------------------------------------------------
+# perf
+# ---------------------------------------------------------------------------
+
+
+def _cmd_perf(args: argparse.Namespace) -> None:
+    """Measure the performance impact of codegen-changed, non-crashed flips using ncu.
+
+    Args:
+        args: Parsed CLI arguments for the ``perf`` subcommand.
+    """
+    for path, flag in [
+        (args.report, "--report"),
+        (args.script, "--script"),
+        (args.library, "--library"),
+        (args.sites, "--sites"),
+    ]:
+        if not path.exists():
+            raise SystemExit(f"{flag}: not found: {path}")
+
+    run_perf(
+        triton_script=args.script,
+        report_json=args.report,
+        flip_sites_json=args.sites,
+        library=args.library,
+        output_dir=args.output,
+        kernel_name=args.kernel_name,
+        primary_metric=args.primary_metric,
+        repeats=args.repeats,
+        launch_skip=args.launch_skip,
+        threshold_pct=args.threshold,
+        max_sites=args.max_sites,
+        run_timeout=args.run_timeout,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +466,44 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_flip.add_argument(
+        "--flip-ids-file",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a text file of exact flip_id values to target (one per "
+            "line), typically the pruned candidate list from a --compile-only "
+            "prescreen run. Requires --tier/--type/--function/--function-list "
+            "to match the run that produced those IDs."
+        ),
+    )
+    p_flip.add_argument(
+        "--compile-only",
+        action="store_true",
+        help=(
+            "Patch Triton so every kernel compiles but never launches on the "
+            "GPU (codegen_changed is still meaningful; stdout_changed is "
+            "always False). No GPU launch means no GPU memory/execution "
+            "contention between workers, so --workers can go much higher for "
+            "a fast prescreen pass; see --flip-ids-file to restrict a "
+            "follow-up full run to just the codegen-changed candidates."
+        ),
+    )
+    p_flip.add_argument(
+        "--replay-signatures",
+        action="store_true",
+        help=(
+            "Requires --compile-only. The baseline run records what each "
+            "kernel was called with (a one-time real run); every flip then "
+            "replays those calls directly instead of running the script at "
+            "all -- no torch tensor allocation, no CUDA touch beyond what "
+            "compilation itself needs. Requires each --script to gate its "
+            'kernel-launching code behind `if __name__ == "__main__":` '
+            "(checked during the baseline run; fails fast with a clear "
+            "message otherwise)."
+        ),
+    )
+    p_flip.add_argument(
         "--filter-by-ptx",
         action="store_true",
         help="Only test instructions whose mnemonic root appears in the baseline PTX",
@@ -413,6 +538,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "Number of concurrent GDB flip processes (default: 1). "
             "Each worker gets its own output directory and Triton cache. "
             "GPU memory is the practical limit: ~200-600 MB per worker. "
+            "With --compile-only, no kernel ever launches, so this limit "
+            "doesn't apply the same way and --workers can go much higher "
+            "(bounded instead by CPU cores/host RAM). "
             "Cooldown is applied between batches of --cooldown-every flips."
         ),
     )
@@ -446,6 +574,123 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_report.set_defaults(func=_cmd_report)
+
+    # -- perf --
+    p_perf = sub.add_parser(
+        "perf",
+        help="Measure the performance impact of codegen-changed, non-crashed flips using ncu.",
+        description=(
+            "Filters a flip report down to codegen-changed, non-crashed flips "
+            "(ignores the input report's stdout_changed, since it's never "
+            "meaningful from a --compile-only prescreen), then profiles each "
+            "one with ncu against a clean baseline to find flips that silently "
+            "degrade kernel performance. Since profiling is itself a real "
+            "execution, it also measures the real stdout_changed as a side "
+            "effect and records it in the output report -- no separate full "
+            "run is needed first just to get that signal. Patches the target "
+            "library on disk (no GDB) since ncu cannot profile a process "
+            "already ptraced by GDB; runs strictly single-threaded since it "
+            "mutates the real library file in place."
+        ),
+    )
+    p_perf.add_argument(
+        "--report",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help=(
+            "Per-script report JSON from 'flip' or 'report' to filter for "
+            "codegen-changed, non-crashed flips"
+        ),
+    )
+    p_perf.add_argument(
+        "--script",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Triton application script to profile (must launch --kernel-name)",
+    )
+    p_perf.add_argument(
+        "--library",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Path to the real, loaded shared library — patched on disk in place",
+    )
+    p_perf.add_argument(
+        "--sites",
+        type=Path,
+        default=Path(DEFAULT_FLIP_SITES),
+        metavar="PATH",
+        help=f"flip_sites.json from scan (default: {DEFAULT_FLIP_SITES})",
+    )
+    p_perf.add_argument(
+        "--kernel-name",
+        required=True,
+        metavar="NAME",
+        help="ncu -k filter identifying the kernel to time (exact name or 'regex:...')",
+    )
+    p_perf.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        metavar="DIR",
+        help=(
+            "Root output directory: golden library backup, per-run Triton "
+            "caches, ncu logs, and perf_report.json"
+        ),
+    )
+    p_perf.add_argument(
+        "--primary-metric",
+        default="Duration",
+        metavar="METRIC",
+        help=(
+            "ncu 'basic' set metric (display name) driving the regression "
+            "decision, e.g. 'Duration', 'Compute (SM) Throughput' "
+            "(default: Duration). All basic-set metrics are always "
+            "collected and recorded regardless of this choice."
+        ),
+    )
+    p_perf.add_argument(
+        "--repeats",
+        type=int,
+        default=5,
+        metavar="N",
+        help=(
+            "Full process re-invocations per condition (baseline and each "
+            "flip); medians are taken across all launches from all repeats "
+            "(default: 5)"
+        ),
+    )
+    p_perf.add_argument(
+        "--launch-skip",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Kernel launches to skip before profiling starts (skip warmup iterations)",
+    )
+    p_perf.add_argument(
+        "--threshold",
+        type=float,
+        default=5.0,
+        metavar="PCT",
+        help="Percent slowdown vs. baseline median to flag as regressed (default: 5.0)",
+    )
+    p_perf.add_argument(
+        "--max-sites",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Profile at most N candidate flips (useful for a quick sanity check)",
+    )
+    p_perf.add_argument(
+        "--run-timeout",
+        type=float,
+        default=None,
+        metavar="SECS",
+        help="Per-ncu-invocation timeout in seconds (default: no limit)",
+    )
+    p_perf.set_defaults(func=_cmd_perf)
 
     return ap
 

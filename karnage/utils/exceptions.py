@@ -41,3 +41,11 @@ class FlipperError(KarnageError):
     Raised when ``flip_sites.json`` cannot be loaded or has an unexpected
     schema.
     """
+
+
+class PerfError(KarnageError):
+    """An error occurred during ncu-based performance measurement.
+
+    Raised when the target library can't be safely backed up before patching,
+    or when ``ncu`` output can't be parsed for the requested metric.
+    """
