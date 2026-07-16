@@ -49,3 +49,12 @@ class PerfError(KarnageError):
     Raised when the target library can't be safely backed up before patching,
     or when ``ncu`` output can't be parsed for the requested metric.
     """
+
+
+class CompileCaptureError(KarnageError):
+    """An error occurred during GPU-free ``triton.compile()`` capture or replay.
+
+    Raised when a kernel's compile could not be captured (e.g. the forced
+    recompile never reached the wrapped ``compile``), or when replay can't
+    re-import the kernel a capture was recorded against.
+    """

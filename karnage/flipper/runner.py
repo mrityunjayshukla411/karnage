@@ -62,6 +62,7 @@ from karnage.utils.models import FlipResult, PatchSpec
 _THIS_DIR = Path(__file__).parent
 _GDB_SCRIPT = _THIS_DIR / "_gdb_script.py"
 _WRAPPER = _THIS_DIR / "_wrapper.py"
+_WRAPPER_COMPILE_REPLAY = _THIS_DIR / "_wrapper_compile_replay.py"
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +164,7 @@ def _run_inferior(
     compile_only: bool = False,
     signature_out: Path | None = None,
     signature_in: Path | None = None,
+    compile_replay: bool = False,
 ) -> bool:
     """Run the Triton script, optionally under GDB with a patch applied.
 
@@ -170,16 +172,23 @@ def _run_inferior(
 
     - ``app_stdout.txt`` --- written by ``_wrapper.py`` via redirected
       ``sys.stdout``; contains only the user script's ``print()`` output.
+      Not written at all in ``compile_replay`` mode (there is no app).
     - ``gdb_stdout.txt`` --- raw GDB process stdout (thread events, vfork
       messages, debuginfod prompts); kept for debugging, not used for diffing.
     - ``gdb_stderr.txt`` --- GDB Python diagnostics (``gdb.write(..., gdb.STDERR)``).
     - ``returncode.txt`` --- integer exit code as a string.
 
-    Sentinels ``_done`` and ``_error.txt`` are written by ``_wrapper.py``
-    inside *output_dir* (via ``KARNAGE_OUTPUT_DIR``).
+    Sentinels ``_done`` and ``_error.txt`` are written by ``_wrapper.py`` (or
+    ``_wrapper_compile_replay.py`` in ``compile_replay`` mode) inside
+    *output_dir* (via ``KARNAGE_OUTPUT_DIR``).
 
     Args:
-        triton_script:   Path to the user Triton script.
+        triton_script:   Path to the user Triton script --- or, when
+                         *compile_replay* is set, path to a capture blob
+                         written by :func:`karnage.compile_capture.capture_all_compiles`
+                         (the parameter is reused rather than duplicated,
+                         since both cases mean "the thing that gets run per
+                         script-equivalent unit").
         output_dir:      Directory to write output files into.
         patch_spec_path: Path to ``patch_spec.json``; ``None`` for baseline.
         timeout:         SIGTERM the GDB process after this many seconds.
@@ -194,11 +203,20 @@ def _run_inferior(
         signature_in:    Replay recorded kernel calls from this manifest
                          instead of running *triton_script* at all ---
                          mutually exclusive with *signature_out*.
+        compile_replay:  Use ``_wrapper_compile_replay.py`` instead of
+                         ``_wrapper.py`` --- replays every specialization in
+                         the *triton_script* capture blob directly through
+                         ``triton.compile()``, no torch/CUDA access at all.
+                         Mutually exclusive with *compile_only* /
+                         *signature_out* / *signature_in* (a fundamentally
+                         different execution path, validated separately in
+                         ``karnage/tests/test_compile_equivalence.py``).
 
     Returns:
         ``True`` if the process exited with code 0.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    wrapper = _WRAPPER_COMPILE_REPLAY if compile_replay else _WRAPPER
 
     env = {**os.environ}
     env[ENV_OUTPUT_DIR] = str(output_dir)          # sentinels land here directly
@@ -212,7 +230,7 @@ def _run_inferior(
         env[ENV_SIGNATURE_IN] = str(signature_in)
 
     if patch_spec_path is None:
-        cmd = [sys.executable, str(_WRAPPER), str(triton_script)]
+        cmd = [sys.executable, str(wrapper), str(triton_script)]
     else:
         env[ENV_PATCH_SPEC] = str(patch_spec_path)
         cmd = [
@@ -222,7 +240,7 @@ def _run_inferior(
             # Suppress the debuginfod auto-download prompt before our script loads.
             "-iex", "set debuginfod enabled off",
             "-x", str(_GDB_SCRIPT),
-            "--args", sys.executable, str(_WRAPPER), str(triton_script),
+            "--args", sys.executable, str(wrapper), str(triton_script),
         ]
 
     try:
@@ -510,6 +528,7 @@ def _flip_one(
     baseline_dir: Path,
     compile_only: bool = False,
     replay_signatures: bool = False,
+    compile_replay: bool = False,
 ) -> dict[str, FlipResult]:
     """Run one bit-flip experiment across all scripts and return per-script results.
 
@@ -527,6 +546,12 @@ def _flip_one(
                            see :func:`run_flipper`) instead of running
                            *script* at all --- no torch/CUDA touch beyond
                            what ``triton.compile()`` itself needs.
+        compile_replay:    Forwarded to :func:`_run_inferior` --- *script* is
+                           actually a capture blob path in this mode (see
+                           :func:`run_flipper`), replayed via
+                           ``karnage.compile_replay`` with zero GPU/CUDA
+                           access. Stdout diffing is skipped, same as
+                           *compile_only* (there is no app to print anything).
 
     Returns:
         Dict mapping ``script.stem`` to its :class:`~karnage.utils.models.FlipResult`.
@@ -552,12 +577,13 @@ def _flip_one(
             timeout=flip_timeout,
             compile_only=compile_only,
             signature_in=signature_in,
+            compile_replay=compile_replay,
         )
         results[script.stem] = _compare(
             spec,
             baseline_dir / script.stem,
             flip_dir / script.stem,
-            compile_only=compile_only,
+            compile_only=compile_only or compile_replay,
         )
     return results
 
@@ -622,6 +648,7 @@ def run_flipper(
     workers: int = 1,
     compile_only: bool = False,
     replay_signatures: bool = False,
+    compile_replay: bool = False,
 ) -> list[FlipResult]:
     """Run the full bit-flip test suite and return all results.
 
@@ -639,10 +666,15 @@ def run_flipper(
     even if ``--report`` was not passed.
 
     Args:
-        triton_scripts:   One or more Triton application scripts.  Every script
-                          is run for *each* flip; results are aggregated with
+        triton_scripts:   One or more Triton application scripts --- or, when
+                          *compile_replay* is set, one or more capture blob
+                          paths written by
+                          :func:`karnage.compile_capture.capture_all_compiles`
+                          (e.g. one per workload under
+                          ``compile_specializations/``). Every entry is run
+                          for *each* flip; results are aggregated with
                           ``any()`` so a flip is flagged if it affects at least
-                          one script.  Each script runs in its own subdir
+                          one. Each runs in its own subdir
                           (``flip_NNNNNN/{script.stem}/``) so Triton caches
                           never collide.
         flip_sites_json:  Path to ``flip_sites.json`` from the scan step.
@@ -698,6 +730,18 @@ def run_flipper(
                           by ``_wrapper.py`` during the baseline run; fails
                           fast with a clear message otherwise). See
                           ``_wrapper.py``'s "Signature capture / replay" docs.
+        compile_replay:   Mutually exclusive with *compile_only* /
+                          *replay_signatures* --- a different execution path,
+                          not a further refinement of them. *triton_scripts*
+                          are capture blob paths, not real scripts; each is
+                          replayed via ``karnage.compile_replay`` (direct
+                          ``triton.compile()`` calls) with zero GPU/CUDA
+                          access, so GDB's bit-flip patch is exercised purely
+                          by the compiler itself. Since no GPU/torch
+                          contention exists at all here, ``workers`` can go
+                          higher still than in ``compile_only`` mode. See
+                          ``karnage/compile_capture.py`` and
+                          ``karnage/compile_replay.py`` module docstrings.
 
     Returns:
         Dict mapping each script stem to its list of
@@ -707,6 +751,13 @@ def run_flipper(
         raise FlipperError(
             "replay_signatures requires compile_only=True (--replay-signatures "
             "requires --compile-only)"
+        )
+    if compile_replay and (compile_only or replay_signatures):
+        raise FlipperError(
+            "compile_replay is mutually exclusive with compile_only / "
+            "replay_signatures --- it's a different execution path (direct "
+            "triton.compile() replay from a capture blob), not a further "
+            "refinement of them"
         )
 
     output_dir = output_dir.resolve()
@@ -754,6 +805,12 @@ def run_flipper(
             "Replay-signatures mode: baseline captures kernel-call signatures once; "
             "every flip replays them directly, with no app/torch/CUDA touch"
         )
+    if compile_replay:
+        logger.info(
+            "Compile-replay mode: replaying captured triton.compile() calls "
+            "directly, zero GPU/CUDA access --- GDB's patch is exercised "
+            "purely by the compiler"
+        )
 
     # --- Baseline ---
     baseline_dir = output_dir / "baseline"
@@ -770,6 +827,7 @@ def run_flipper(
             script_baseline,
             compile_only=compile_only,
             signature_out=signature_out,
+            compile_replay=compile_replay,
         ):
             logger.warning(
                 f"Baseline run failed for {script.name} "
@@ -812,6 +870,7 @@ def run_flipper(
         baseline_dir=baseline_dir,
         compile_only=compile_only,
         replay_signatures=replay_signatures,
+        compile_replay=compile_replay,
     )
     desc_suffix = f" ({workers} workers)" if workers > 1 else ""
 

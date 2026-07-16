@@ -23,6 +23,11 @@ Subcommands
           side effect (the input report's stdout_changed is ignored, since
           it's never meaningful from a --compile-only prescreen).
 
+  capture Run a workload for real (one real GPU launch) and record every
+          triton.compile() call it makes, for later GPU-free replay via
+          'flip --compile-replay' --- true zero-CUDA-touch fault injection,
+          reusing GDB + --workers with no per-worker library copies needed.
+
 Quick start
 -----------
   # Step 1 - discover flip sites
@@ -67,6 +72,16 @@ Quick start
       --sites flip_sites.json \\
       --kernel-name vector_add_kernel \\
       --output perf_results/
+
+  # Step 5 (optional) - true zero-GPU fault injection: capture once (real
+  # GPU launch), then replay every flip's compile with no CUDA access at all
+  python main.py capture \\
+      --script triton_kernels/attention.py \\
+      --output compile_specializations/attention.pkl
+  python main.py flip --compile-replay --workers 64 \\
+      --script compile_specializations/attention.pkl \\
+      --library /path/to/libtriton.so \\
+      --output compile_replay_results/ --report compile_replay_reports/
 """
 
 import argparse
@@ -195,6 +210,13 @@ def _cmd_flip(args: argparse.Namespace) -> None:
 
     if args.replay_signatures and not args.compile_only:
         raise SystemExit("--replay-signatures requires --compile-only")
+    if args.compile_replay and (args.compile_only or args.replay_signatures):
+        raise SystemExit(
+            "--compile-replay is mutually exclusive with --compile-only / "
+            "--replay-signatures --- it's a different execution path (direct "
+            "triton.compile() replay from a capture blob), not a further "
+            "refinement of them"
+        )
 
     run_flipper(
         triton_scripts=args.script,
@@ -214,6 +236,7 @@ def _cmd_flip(args: argparse.Namespace) -> None:
         workers=args.workers,
         compile_only=args.compile_only,
         replay_signatures=args.replay_signatures,
+        compile_replay=args.compile_replay,
     )
 
 
@@ -293,6 +316,40 @@ def _cmd_perf(args: argparse.Namespace) -> None:
         threshold_pct=args.threshold,
         max_sites=args.max_sites,
         run_timeout=args.run_timeout,
+    )
+
+
+# ---------------------------------------------------------------------------
+# capture
+# ---------------------------------------------------------------------------
+
+
+def _cmd_capture(args: argparse.Namespace) -> None:
+    """Run a workload for real and capture every triton.compile() call it makes.
+
+    Args:
+        args: Parsed CLI arguments for the ``capture`` subcommand.
+    """
+    if not args.script.exists():
+        raise SystemExit(f"--script: not found: {args.script}")
+
+    import runpy
+
+    from karnage.compile_capture import capture_all_compiles
+
+    with capture_all_compiles(args.output) as store:
+        runpy.run_path(str(args.script), run_name="__main__")
+
+    n_kernels = len(store)
+    n_specs = sum(len(v) for v in store.values())
+    if n_specs == 0:
+        raise SystemExit(
+            f"capture produced no entries --- did {args.script.name} call any "
+            f"@triton.jit kernel?"
+        )
+    logger.success(
+        f"Captured {n_specs} specialization(s) across {n_kernels} kernel(s) "
+        f"from {args.script.name} → {args.output}"
     )
 
 
@@ -504,6 +561,22 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_flip.add_argument(
+        "--compile-replay",
+        action="store_true",
+        help=(
+            "Mutually exclusive with --compile-only / --replay-signatures -- "
+            "a different execution path, not a further refinement of them. "
+            "--script arguments are capture blob paths written by "
+            "karnage.compile_capture.capture_all_compiles (e.g. one per "
+            "workload under compile_specializations/), not real scripts. "
+            "Each flip replays every captured triton.compile() call directly "
+            "(karnage.compile_replay), with zero GPU/CUDA access at all -- "
+            "GDB's bit-flip patch is exercised purely by the compiler. See "
+            "karnage/tests/test_compile_equivalence.py for the proof this is "
+            "the same compilation a real run would have done."
+        ),
+    )
+    p_flip.add_argument(
         "--filter-by-ptx",
         action="store_true",
         help="Only test instructions whose mnemonic root appears in the baseline PTX",
@@ -691,6 +764,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Per-ncu-invocation timeout in seconds (default: no limit)",
     )
     p_perf.set_defaults(func=_cmd_perf)
+
+    # -- capture --
+    p_capture = sub.add_parser(
+        "capture",
+        help="Run a workload for real and capture every triton.compile() call for GPU-free replay.",
+        description=(
+            "Runs --script for real (one real GPU launch) and records the "
+            "exact (signature, constants, attrs, target, options) tuple its "
+            "normal JIT path passes to triton.compile() for every kernel "
+            "specialization it exercises, plus the resulting compiled "
+            "artifacts (ttir/ttgir/llir/ptx/cubin). Requires --script to "
+            "gate its kernel-launching code behind "
+            "`if __name__ == \"__main__\":` so it can later be re-imported "
+            "as a module (not run) during GPU-free replay --- see "
+            "karnage/compile_replay.py. Output feeds 'flip --compile-replay'."
+        ),
+    )
+    p_capture.add_argument(
+        "--script",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Triton workload script to run for real and capture compiles from",
+    )
+    p_capture.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help=(
+            "Where to write the captured specialization blob (pickle), e.g. "
+            "compile_specializations/attention.pkl"
+        ),
+    )
+    p_capture.set_defaults(func=_cmd_capture)
 
     return ap
 
