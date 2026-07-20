@@ -66,6 +66,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -246,8 +247,9 @@ def _run_ncu(
     launch_skip: int = 0,
     timeout: float | None = None,
     ncu_path: str = "ncu",
+    metrics: str | None = None,
 ) -> list[dict[str, float]]:
-    """Profile *triton_script* once under ``ncu`` (no GDB) with the ``basic`` metric set.
+    """Profile *triton_script* once under ``ncu`` (no GDB).
 
     Forces a fresh, uncached Triton compilation (same env-var contract
     :func:`karnage.flipper.runner._run_inferior` uses) so the currently
@@ -262,6 +264,16 @@ def _run_ncu(
                        (``ncu --launch-skip``); use to skip warmup iterations.
         timeout:       Kill the ``ncu`` process after this many seconds.
         ncu_path:      ``ncu`` executable to invoke.
+        metrics:       Comma-separated raw ``ncu`` metric names (``ncu
+                       --metrics``) to collect instead of the ``basic`` named
+                       set (``--set basic``). ``basic`` is ncu's smallest
+                       *named* set (~200 metrics, most needing their own
+                       kernel replay pass --- empirically tens of minutes for
+                       one kernel on one run); naming metrics explicitly
+                       (e.g. ``"gpu__time_duration.sum"`` for just timing)
+                       collects only those, in as few replay passes as they
+                       need, typically one. ``None`` (default) keeps the
+                       original ``--set basic`` behavior.
 
     Returns:
         One ``{metric_name: value}`` dict per matched kernel launch (see
@@ -281,7 +293,7 @@ def _run_ncu(
     cmd = [
         ncu_path,
         "--target-processes", "all",
-        "--set", "basic",
+        *(["--metrics", metrics] if metrics else ["--set", "basic"]),
         "--csv",
         "-k", kernel_name,
         "--log-file", str(log_file),
@@ -291,21 +303,34 @@ def _run_ncu(
     cmd += ["--", sys.executable, str(triton_script)]
 
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, env=env, timeout=timeout
+        # start_new_session=True + killpg on timeout: plain subprocess.run's
+        # timeout only SIGKILLs ncu itself, not "-- python triton_script.py"
+        # (a grandchild ncu launches), so a timed-out ncu would otherwise
+        # leave the profiled process --- and whatever it's still doing on the
+        # GPU --- running, silently stalling the *next* repeat's profiling.
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=env, start_new_session=True,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise PerfError(
-            f"ncu timed out after {timeout}s profiling {triton_script.name}",
-            context={"script": str(triton_script)},
-        ) from exc
+        try:
+            stdout, _stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # exited between the timeout firing and the kill
+            proc.communicate()
+            raise PerfError(
+                f"ncu timed out after {timeout}s profiling {triton_script.name}",
+                context={"script": str(triton_script)},
+            )
     except FileNotFoundError as exc:
         raise PerfError(f"ncu executable not found: {exc}") from exc
 
     # --log-file captures *all* ncu tool output --- including the --csv table
     # itself, not just the "==PROF==" diagnostic noise --- so proc.stdout ends
     # up containing only the profiled application's own prints.
-    (output_dir / "app_stdout.txt").write_text(proc.stdout)
+    (output_dir / "app_stdout.txt").write_text(stdout)
 
     if proc.returncode != 0:
         raise PerfError(
@@ -340,6 +365,7 @@ def _profile_repeated(
     launch_skip: int = 0,
     timeout: float | None = None,
     ncu_path: str = "ncu",
+    metrics: str | None = None,
 ) -> tuple[list[dict[str, float]], str]:
     """Run :func:`_run_ncu` *repeats* times and concatenate all launch samples.
 
@@ -365,6 +391,7 @@ def _profile_repeated(
         launch_skip:   Forwarded to each repeat's :func:`_run_ncu` call.
         timeout:       Forwarded to each repeat's :func:`_run_ncu` call.
         ncu_path:      ``ncu`` executable to invoke.
+        metrics:       Forwarded to each repeat's :func:`_run_ncu` call.
 
     Returns:
         Tuple of (all per-launch metric dicts from every repeat, concatenated;
@@ -382,6 +409,7 @@ def _profile_repeated(
                 launch_skip=launch_skip,
                 timeout=timeout,
                 ncu_path=ncu_path,
+                metrics=metrics,
             )
         )
         if i == 0:
@@ -431,6 +459,7 @@ def run_perf(
     threshold_pct: float = 5.0,
     max_sites: int | None = None,
     run_timeout: float | None = None,
+    ncu_metrics: str | None = None,
 ) -> list[dict]:
     """Measure the performance impact of every codegen-changed, non-crashed flip.
 
@@ -485,6 +514,13 @@ def run_perf(
                           ``regressed``.
         max_sites:        Profile at most this many candidates (debug cap).
         run_timeout:      Per-``ncu``-invocation timeout in seconds.
+        ncu_metrics:      Comma-separated raw ``ncu`` metric names to collect
+                          instead of the full ``basic`` set --- see
+                          :func:`_run_ncu`. When set, *primary_metric* must
+                          match one of these metrics' ncu CSV display name,
+                          not necessarily ``"Duration"`` (the default assumes
+                          the ``basic`` set, which always has a ``"Duration"``
+                          row).
 
     Returns:
         List of per-flip result dicts, one per successfully profiled
@@ -535,6 +571,7 @@ def run_perf(
         repeats=repeats,
         launch_skip=launch_skip,
         timeout=run_timeout,
+        metrics=ncu_metrics,
     )
     baseline_metrics = _medians(baseline_launches)
     if primary_metric not in baseline_metrics:
@@ -587,6 +624,7 @@ def run_perf(
                         repeats=repeats,
                         launch_skip=launch_skip,
                         timeout=run_timeout,
+                        metrics=ncu_metrics,
                     )
             except PerfError as exc:
                 logger.warning(f"[{flip_id}] ncu failed: {exc}")

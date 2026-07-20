@@ -32,8 +32,6 @@ from __future__ import annotations
 import importlib.util
 import sys
 
-from karnage.utils.exceptions import CompileCaptureError
-
 
 def _import_kernel(source_file: str, qualname: str):
     """Import the kernel object a capture entry was recorded against.
@@ -54,8 +52,11 @@ def _import_kernel(source_file: str, qualname: str):
         The re-imported ``JITFunction`` (or ``Autotuner``, etc.) object.
 
     Raises:
-        CompileCaptureError: If *qualname* can't be resolved on the imported
-                              module.
+        ImportError: If *qualname* can't be resolved on the imported module.
+                     (A plain built-in, not ``karnage.utils.exceptions``'s
+                     ``CompileCaptureError`` --- this module must stay
+                     importable with zero ``karnage`` package dependency;
+                     see the module docstring.)
     """
     spec = importlib.util.spec_from_file_location(
         "_karnage_compile_replay_target", source_file
@@ -69,10 +70,9 @@ def _import_kernel(source_file: str, qualname: str):
         try:
             obj = getattr(obj, part)
         except AttributeError as exc:
-            raise CompileCaptureError(
+            raise ImportError(
                 f"replay could not resolve {qualname!r} in {source_file} "
-                f"(failed at {part!r})",
-                context={"source_file": source_file, "qualname": qualname},
+                f"(failed at {part!r})"
             ) from exc
     return obj
 

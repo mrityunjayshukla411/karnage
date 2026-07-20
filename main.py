@@ -316,6 +316,7 @@ def _cmd_perf(args: argparse.Namespace) -> None:
         threshold_pct=args.threshold,
         max_sites=args.max_sites,
         run_timeout=args.run_timeout,
+        ncu_metrics=args.ncu_metrics,
     )
 
 
@@ -718,10 +719,29 @@ def _build_parser() -> argparse.ArgumentParser:
         default="Duration",
         metavar="METRIC",
         help=(
-            "ncu 'basic' set metric (display name) driving the regression "
-            "decision, e.g. 'Duration', 'Compute (SM) Throughput' "
-            "(default: Duration). All basic-set metrics are always "
-            "collected and recorded regardless of this choice."
+            "ncu metric (display name, as it appears in the ncu CSV output) "
+            "driving the regression decision, e.g. 'Duration', "
+            "'Compute (SM) Throughput' (default: Duration). All collected "
+            "metrics are still recorded regardless of this choice --- with "
+            "the default 'basic' set (see --ncu-metrics) that's the full "
+            "~200-metric set; with --ncu-metrics it's only what you asked "
+            "for, so this must name one of those."
+        ),
+    )
+    p_perf.add_argument(
+        "--ncu-metrics",
+        default=None,
+        metavar="METRIC1,METRIC2,...",
+        help=(
+            "Comma-separated raw ncu metric names (ncu --metrics) to collect "
+            "instead of the 'basic' named set (ncu --set basic). 'basic' is "
+            "ncu's smallest predefined set but still ~200 metrics, most "
+            "needing their own kernel replay pass --- empirically tens of "
+            "minutes for one kernel on one run. Naming metrics explicitly "
+            "collects only those, e.g. --ncu-metrics gpu__time_duration.sum "
+            "for just timing (one replay pass). When set, --primary-metric "
+            "must match one of these metrics' ncu CSV display name, not "
+            "'Duration' by default assumption."
         ),
     )
     p_perf.add_argument(

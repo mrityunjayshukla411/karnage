@@ -29,6 +29,7 @@ import functools
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -244,23 +245,36 @@ def _run_inferior(
         ]
 
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, env=env, timeout=timeout
+        # start_new_session=True puts the child (gdb, or the bare wrapper for
+        # a baseline run) in its own process group. On an ordinary exit this
+        # changes nothing, but it lets the timeout path below reap the whole
+        # tree instead of leaking it --- see this function's docstring update:
+        # subprocess.run(timeout=...) only SIGKILLs the direct child, so a
+        # ptrace'd GDB inferior (grandchild, survives its tracer dying) or a
+        # ptxas subprocess spawned by Triton (grandchild of a killed baseline
+        # wrapper) would otherwise be orphaned and keep running --- holding a
+        # GPU context or a Triton cache lock file that makes a *later*, fresh
+        # run hang for reasons that have nothing to do with that run itself.
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            start_new_session=True,
         )
-        stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
-    except subprocess.TimeoutExpired as exc:
-        stdout = (
-            exc.stdout.decode(errors="replace")
-            if isinstance(exc.stdout, bytes)
-            else (exc.stdout or "")
-        )
-        stderr = (
-            exc.stderr.decode(errors="replace")
-            if isinstance(exc.stderr, bytes)
-            else (exc.stderr or "")
-        )
-        rc = -1
-        (output_dir / "_timeout").touch()
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # exited between the timeout firing and the kill
+            stdout, stderr = proc.communicate()
+            rc = -1
+            (output_dir / "_timeout").touch()
+        else:
+            rc = proc.returncode
     except FileNotFoundError as exc:
         (output_dir / "gdb_stderr.txt").write_text(f"Command not found: {exc}\n")
         (output_dir / "returncode.txt").write_text("-1")
@@ -825,12 +839,18 @@ def run_flipper(
         if not _run_inferior(
             script,
             script_baseline,
+            timeout=flip_timeout,
             compile_only=compile_only,
             signature_out=signature_out,
             compile_replay=compile_replay,
         ):
+            timeout_note = (
+                " (timed out)"
+                if (script_baseline / "_timeout").exists()
+                else ""
+            )
             logger.warning(
-                f"Baseline run failed for {script.name} "
+                f"Baseline run failed for {script.name}{timeout_note} "
                 f"--- see {script_baseline}/gdb_stderr.txt"
             )
 
@@ -906,7 +926,19 @@ def run_flipper(
                             f"[dim]{spec.opcode_before}→{spec.opcode_after}[/dim]"
                         ),
                     )
-                    per_script = flip_fn(spec)
+                    try:
+                        per_script = flip_fn(spec)
+                    except Exception as exc:
+                        # A crashed/timed-out flip is already reported as data
+                        # by _run_inferior/_compare (crashed=True); reaching
+                        # here means something else went wrong (e.g. disk
+                        # I/O). One bad site must never abort the whole sweep.
+                        logger.warning(
+                            f"[{spec.flip_id}] flip_fn raised {type(exc).__name__}: "
+                            f"{exc} --- skipping, not recorded in results"
+                        )
+                        progress.advance(task)
+                        continue
                     _log_result(per_script)
                     for stem, r in per_script.items():
                         results[stem].append(r)
@@ -915,7 +947,17 @@ def run_flipper(
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     futures = {pool.submit(flip_fn, spec): spec for spec in batch}
                     for future in as_completed(futures):
-                        per_script = future.result()
+                        spec = futures[future]
+                        try:
+                            per_script = future.result()
+                        except Exception as exc:
+                            logger.warning(
+                                f"[{spec.flip_id}] flip_fn raised "
+                                f"{type(exc).__name__}: {exc} --- skipping, "
+                                f"not recorded in results"
+                            )
+                            progress.advance(task)
+                            continue
                         _log_result(per_script)
                         for stem, r in per_script.items():
                             results[stem].append(r)
