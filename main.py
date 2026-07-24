@@ -303,6 +303,11 @@ def _cmd_perf(args: argparse.Namespace) -> None:
         if not path.exists():
             raise SystemExit(f"{flag}: not found: {path}")
 
+    if args.profiler in ("rocprof", "wall") and args.ncu_metrics is not None:
+        raise SystemExit(f"--ncu-metrics is not valid with --profiler {args.profiler}")
+    if args.profiler in ("ncu", "rocprof") and args.kernel_name is None:
+        raise SystemExit(f"--kernel-name is required with --profiler {args.profiler}")
+
     run_perf(
         triton_script=args.script,
         report_json=args.report,
@@ -317,6 +322,7 @@ def _cmd_perf(args: argparse.Namespace) -> None:
         max_sites=args.max_sites,
         run_timeout=args.run_timeout,
         ncu_metrics=args.ncu_metrics,
+        profiler=args.profiler,
     )
 
 
@@ -700,9 +706,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_perf.add_argument(
         "--kernel-name",
-        required=True,
+        default=None,
         metavar="NAME",
-        help="ncu -k filter identifying the kernel to time (exact name or 'regex:...')",
+        help=(
+            "Kernel filter identifying the kernel to time (exact name or "
+            "'regex:...'). Passed to ncu -k; with --profiler rocprof, "
+            "matched client-side against rocprofv3's Kernel_Name column "
+            "(rocprofv3's own --kernel-include-regex does not filter "
+            "--kernel-trace output, only counter-collection/thread-trace). "
+            "Required unless --profiler wall (no kernel-level filter in that "
+            "mode --- the whole process is timed)."
+        ),
+    )
+    p_perf.add_argument(
+        "--profiler",
+        choices=["ncu", "rocprof", "wall"],
+        default="ncu",
+        help=(
+            "Profiling backend: 'ncu' (default, NVIDIA/Nsight Compute), "
+            "'rocprof' (AMD/ROCm, via rocprofv3 --kernel-trace), or 'wall' "
+            "(no GPU profiler at all --- whole-process wall-clock time; use "
+            "when no kernel-level profiler works in your environment, e.g. "
+            "rocprofv3 breaking HIP device-count enumeration for processes "
+            "that import vllm). rocprof mode only collects Duration "
+            "(kernel-timestamp delta, nanoseconds) plus a few free "
+            "register/grid-size columns --- there is no basic-set "
+            "equivalent for ROCm, so --ncu-metrics is rejected in both "
+            "rocprof and wall mode."
+        ),
     )
     p_perf.add_argument(
         "--output",
@@ -741,7 +772,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "collects only those, e.g. --ncu-metrics gpu__time_duration.sum "
             "for just timing (one replay pass). When set, --primary-metric "
             "must match one of these metrics' ncu CSV display name, not "
-            "'Duration' by default assumption."
+            "'Duration' by default assumption. Only valid with --profiler ncu "
+            "(the default) --- rejected with --profiler rocprof or wall."
         ),
     )
     p_perf.add_argument(

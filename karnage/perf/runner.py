@@ -1,36 +1,41 @@
-"""ncu-based performance measurement for codegen-changed, non-crashed flip sites.
+"""ncu/rocprofv3-based performance measurement for codegen-changed, non-crashed flip sites.
 
 Given a report produced by ``karnage flip`` (including a fast ``--compile-only``
 prescreen, whose ``stdout_changed`` is never meaningful --- see
 :func:`_load_candidates`), finds flips that changed codegen (PTX / AMDGCN /
 LLVM IR) without crashing, and measures each one's effect using ``ncu``
-(Nsight Compute). Because this profiling run is itself a real execution
-(unlike a compile-only prescreen), it also determines the *real*
-``stdout_changed`` as a side effect of the same run used for timing --- no
-separate full-execution pass is needed first. A flip that turns out to be
-functionally invisible (no crash, no stdout change) *and* meaningfully slower
-is the most dangerous kind of miscompile this whole pipeline is hunting for.
+(Nsight Compute, NVIDIA) or ``rocprofv3`` (ROCm, AMD) --- see ``profiler``.
+Because this profiling run is itself a real execution (unlike a compile-only
+prescreen), it also determines the *real* ``stdout_changed`` as a side effect
+of the same run used for timing --- no separate full-execution pass is needed
+first. A flip that turns out to be functionally invisible (no crash, no
+stdout change) *and* meaningfully slower is the most dangerous kind of
+miscompile this whole pipeline is hunting for.
 
-Each condition (baseline, and every candidate flip) is profiled with ncu's
-``basic`` metric set (Duration, Compute/Memory Throughput, Achieved Occupancy,
-Registers Per Thread, etc.) --- not just duration --- so a flagged regression
-comes with the diagnostic context to explain *why* (e.g. occupancy dropped,
-more registers spilled, throughput shifted). The ``Duration`` metric is the
-one used for the regression decision by default; see ``primary_metric``.
-Every condition is profiled ``repeats`` times (whole-process re-invocations,
-not just kernel launches within one run) and medians are taken across all
-launches from all repeats, since a single sample is thin evidence for a
-performance claim.
+Each condition (baseline, and every candidate flip) is profiled and medians
+are taken across all launches from all repeats, since a single sample is thin
+evidence for a performance claim. With ``profiler="ncu"``, the default is
+ncu's ``basic`` metric set (Duration, Compute/Memory Throughput, Achieved
+Occupancy, Registers Per Thread, etc.) --- not just duration --- so a flagged
+regression comes with diagnostic context to explain *why*. With
+``profiler="rocprof"``, only kernel duration (``rocprofv3 --kernel-trace``'s
+``End_Timestamp - Start_Timestamp``, in nanoseconds) plus a few free register/
+grid-size columns are collected --- rocprofv3 has no equivalent of ncu's named
+``basic`` set, and AMD hardware counters need to be picked individually via
+``--pmc``, which this module does not do. The ``Duration`` metric is the one
+used for the regression decision by default in both cases; see
+``primary_metric``.
 
 Why this does *not* reuse the GDB-based flip mechanism
 --------------------------------------------------------
 :mod:`karnage.flipper` applies each bit-flip live in memory via ``gdb --batch``
-ptrace (see ``_gdb_script.py``).  Empirically, ``ncu`` cannot profile a process
-that is already ptraced by another debugger --- ``ncu -- gdb --batch --args
-prog`` silently reports "No kernels were profiled", while the identical
-invocation through any other intermediary (or no intermediary at all) works
-fine.  This is Linux's ptrace exclusivity (one tracer per tracee), not a flag
-or configuration issue, so nesting ``ncu`` under the GDB patcher is a dead end.
+ptrace (see ``_gdb_script.py``).  Empirically, neither ``ncu`` nor
+``rocprofv3`` can profile a process that is already ptraced by another
+debugger --- e.g. ``ncu -- gdb --batch --args prog`` silently reports "No
+kernels were profiled", while the identical invocation through any other
+intermediary (or no intermediary at all) works fine.  This is Linux's ptrace
+exclusivity (one tracer per tracee), not a flag or configuration issue, so
+nesting either profiler under the GDB patcher is a dead end.
 
 Instead, this module patches the target byte **on disk**, directly in the
 real ``--library`` file (translating the flip site's linker VMA to a file
@@ -65,11 +70,13 @@ import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import statistics
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -93,6 +100,20 @@ from karnage.utils.parser import linker_vma_to_file_offset
 
 _DEFAULT_PRIMARY_METRIC = "Duration"
 _DEFAULT_REPEATS = 5
+_DEFAULT_NCU_PATH = "ncu"
+_DEFAULT_ROCPROF_PATH = "rocprofv3"
+
+# rocprofv3 --kernel-trace CSV columns collected as extra diagnostic context
+# alongside Duration, mirroring (loosely) ncu's Registers-Per-Thread /
+# LaunchStats metrics --- cheap to read since they're already in every row,
+# no extra --pmc pass required.
+_ROCPROF_EXTRA_COLUMNS: tuple[str, ...] = (
+    "VGPR_Count",
+    "Accum_VGPR_Count",
+    "SGPR_Count",
+    "Scratch_Size",
+    "LDS_Block_Size",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -356,25 +377,274 @@ def _run_ncu(
     return launches
 
 
-def _profile_repeated(
+def _parse_rocprof_kernel_trace_csv(
+    csv_path: Path, kernel_regex: "re.Pattern[str]"
+) -> list[dict[str, float]]:
+    """Parse one ``rocprofv3 --kernel-trace -f csv`` ``*_kernel_trace.csv`` file.
+
+    ``--kernel-trace`` unconditionally records *every* kernel dispatch ---
+    unlike ncu's ``-k``, rocprofv3's ``--kernel-include-regex`` only applies
+    to counter-collection and thread-trace data (per its own ``--help`` text),
+    not plain kernel-dispatch tracing; empirically confirmed, the flag has no
+    effect here. So *kernel_regex* is applied here instead, against each row's
+    ``Kernel_Name`` (``re.search``, matching :func:`_run_ncu`'s ``-k``
+    semantics of substring/pattern matching rather than requiring a full match).
+
+    ``Duration`` is derived from ``End_Timestamp - Start_Timestamp`` (both
+    nanosecond HSA timestamps) since rocprofv3 has no single "Duration" column
+    of its own. A handful of other columns (``VGPR_Count``, etc.) are carried
+    through unchanged as free diagnostic context --- see
+    :data:`_ROCPROF_EXTRA_COLUMNS`.
+
+    Args:
+        csv_path:     Path to one ``*_kernel_trace.csv`` file.
+        kernel_regex: Compiled pattern matched against ``Kernel_Name``.
+
+    Returns:
+        One ``{metric_name: value}`` dict per matching ``KERNEL_DISPATCH``
+        row, in file order.
+    """
+    launches: list[dict[str, float]] = []
+    with csv_path.open(newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("Kind") != "KERNEL_DISPATCH":
+                continue
+            if not kernel_regex.search(row.get("Kernel_Name") or ""):
+                continue
+            try:
+                start = float(row["Start_Timestamp"])
+                end = float(row["End_Timestamp"])
+            except (KeyError, ValueError):
+                continue
+            metrics: dict[str, float] = {"Duration": end - start}
+            for col in _ROCPROF_EXTRA_COLUMNS:
+                raw = row.get(col)
+                if raw is None:
+                    continue
+                try:
+                    metrics[col] = float(raw)
+                except ValueError:
+                    pass
+            launches.append(metrics)
+    return launches
+
+
+def _run_rocprof(
     triton_script: Path,
     kernel_name: str,
+    output_dir: Path,
+    *,
+    timeout: float | None = None,
+    rocprof_path: str = _DEFAULT_ROCPROF_PATH,
+) -> list[dict[str, float]]:
+    """Profile *triton_script* once under ``rocprofv3 --kernel-trace`` (no GDB).
+
+    AMD analogue of :func:`_run_ncu`. Forces a fresh, uncached Triton
+    compilation the same way, so the currently on-disk state of the library
+    (patched or not) is what actually gets compiled against.
+
+    Args:
+        triton_script: Triton application script to run.
+        kernel_name:   Kernel filter --- exact name, or ``regex:...`` for a
+                        raw regex --- matching :func:`_run_ncu`'s ``-k``
+                        convention. Applied client-side against each row's
+                        ``Kernel_Name`` in :func:`_parse_rocprof_kernel_trace_csv`
+                        (exact names are ``re.escape``d first) --- rocprofv3's
+                        own ``--kernel-include-regex`` does not filter
+                        ``--kernel-trace`` output (only counter-collection /
+                        thread-trace data), so it is not used here.
+        output_dir:    Directory for this run's Triton cache and rocprofv3
+                        output tree.
+        timeout:       Kill the ``rocprofv3`` process after this many seconds.
+        rocprof_path:  ``rocprofv3`` executable to invoke.
+
+    Returns:
+        One ``{metric_name: value}`` dict per matched kernel launch (see
+        :func:`_parse_rocprof_kernel_trace_csv`).
+
+    Raises:
+        PerfError: If ``rocprofv3`` exits non-zero, times out, or produces no
+                   rows for *kernel_name*.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trace_dir = output_dir / "rocprof_out"
+
+    env = {**os.environ}
+    env[ENV_TRITON_CACHE] = str(output_dir / "triton_cache")
+    env[ENV_ALWAYS_COMPILE] = "1"
+
+    pattern = (
+        kernel_name[len("regex:"):]
+        if kernel_name.startswith("regex:")
+        else re.escape(kernel_name)
+    )
+    kernel_regex = re.compile(pattern)
+
+    cmd = [
+        rocprof_path,
+        "--kernel-trace",
+        "-f", "csv",
+        "-d", str(trace_dir),
+        "--",
+        sys.executable, str(triton_script),
+    ]
+
+    try:
+        # Same start_new_session=True + killpg rationale as _run_ncu: a
+        # timed-out rocprofv3 would otherwise leave the profiled grandchild
+        # running on the GPU, silently stalling the next repeat.
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=env, start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # exited between the timeout firing and the kill
+            proc.communicate()
+            raise PerfError(
+                f"rocprofv3 timed out after {timeout}s profiling {triton_script.name}",
+                context={"script": str(triton_script)},
+            )
+    except FileNotFoundError as exc:
+        raise PerfError(f"rocprofv3 executable not found: {exc}") from exc
+
+    (output_dir / "app_stdout.txt").write_text(stdout)
+    (output_dir / "rocprof_stderr.txt").write_text(stderr)
+
+    if proc.returncode != 0:
+        raise PerfError(
+            f"rocprofv3 exited {proc.returncode} for {triton_script.name} "
+            f"--- see {output_dir}/rocprof_stderr.txt",
+            context={"returncode": proc.returncode},
+        )
+
+    # rocprofv3 writes under -d as <output-dir>/<hostname>/<pid>_kernel_trace.csv
+    # --- pid varies per invocation, so locate it by glob rather than by a
+    # predicted path.
+    csv_files = sorted(trace_dir.rglob("*_kernel_trace.csv"))
+    if not csv_files:
+        raise PerfError(
+            f"rocprofv3 exited 0 but wrote no *_kernel_trace.csv under "
+            f"{trace_dir} for {triton_script.name}",
+            context={"trace_dir": str(trace_dir)},
+        )
+
+    launches: list[dict[str, float]] = []
+    for csv_path in csv_files:
+        launches.extend(_parse_rocprof_kernel_trace_csv(csv_path, kernel_regex))
+
+    if not launches:
+        raise PerfError(
+            f"rocprofv3 produced no kernel-dispatch rows matching "
+            f"{kernel_name!r} for {triton_script.name} --- see {csv_files}",
+            context={"kernel_name": kernel_name, "script": str(triton_script)},
+        )
+    return launches
+
+
+def _run_walltime(
+    triton_script: Path,
+    output_dir: Path,
+    *,
+    timeout: float | None = None,
+) -> list[dict[str, float]]:
+    """Time one full run of *triton_script* end-to-end, no profiler involved.
+
+    No ``ncu``/``rocprofv3`` wrapping at all --- just ``time.perf_counter_ns()``
+    around the whole child process lifetime (Python startup, imports, engine
+    init, everything). This is the fallback for workloads where GPU-level
+    profiling tools can't be used at all --- e.g. on this environment,
+    ``rocprofv3`` breaks HIP device-count enumeration for any process that
+    imports ``vllm`` (its own ``triton_utils`` import-time check, and
+    ``amdsmi``-based platform detection, both see 0 active drivers under
+    ``rocprofv3``'s instrumentation even though real GPU compute in that same
+    process works fine) --- see the module's git history / PR discussion for
+    the investigation. Coarser than kernel-level timing (measures the whole
+    process, not one kernel), but robust: nothing about it depends on GPU
+    profiler tooling working at all.
+
+    Args:
+        triton_script: Triton application script to run.
+        output_dir:    Directory for this run's Triton cache and stdout.
+        timeout:       Kill the process after this many seconds.
+
+    Returns:
+        A single-entry list ``[{"Duration": elapsed_nanoseconds}]``, kept as
+        a list of one "launch" so it composes with :func:`_medians` /
+        :func:`_profile_repeated` the same way ``_run_ncu``/``_run_rocprof``
+        do.
+
+    Raises:
+        PerfError: If the process exits non-zero or times out.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    env = {**os.environ}
+    env[ENV_TRITON_CACHE] = str(output_dir / "triton_cache")
+    env[ENV_ALWAYS_COMPILE] = "1"
+
+    cmd = [sys.executable, str(triton_script)]
+
+    start_ns = time.perf_counter_ns()
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=env, start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # exited between the timeout firing and the kill
+            proc.communicate()
+            raise PerfError(
+                f"{triton_script.name} timed out after {timeout}s (wall-time mode)",
+                context={"script": str(triton_script)},
+            )
+    except FileNotFoundError as exc:
+        raise PerfError(f"python executable not found: {exc}") from exc
+    end_ns = time.perf_counter_ns()
+
+    (output_dir / "app_stdout.txt").write_text(stdout)
+    (output_dir / "app_stderr.txt").write_text(stderr)
+
+    if proc.returncode != 0:
+        raise PerfError(
+            f"{triton_script.name} exited {proc.returncode} (wall-time mode) "
+            f"--- see {output_dir}/app_stderr.txt",
+            context={"returncode": proc.returncode},
+        )
+
+    return [{"Duration": float(end_ns - start_ns)}]
+
+
+def _profile_repeated(
+    triton_script: Path,
+    kernel_name: str | None,
     output_dir: Path,
     *,
     repeats: int,
     launch_skip: int = 0,
     timeout: float | None = None,
-    ncu_path: str = "ncu",
+    profiler: str = "ncu",
+    ncu_path: str = _DEFAULT_NCU_PATH,
     metrics: str | None = None,
+    rocprof_path: str = _DEFAULT_ROCPROF_PATH,
 ) -> tuple[list[dict[str, float]], str]:
-    """Run :func:`_run_ncu` *repeats* times and concatenate all launch samples.
+    """Run :func:`_run_ncu`, :func:`_run_rocprof`, or :func:`_run_walltime` *repeats* times.
 
-    Each repeat is a full process re-invocation (fresh ``ncu`` + fresh
+    Each repeat is a full process re-invocation (fresh profiler + fresh
     ``triton_script`` process), not just multiple kernel launches within one
     run --- this is what actually averages out run-to-run noise (process
     startup variance, GPU clock state, etc.), which a single invocation
-    cannot. Each repeat gets its own subdirectory so Triton caches and ncu
-    logs never collide.
+    cannot. Each repeat gets its own subdirectory so Triton caches and
+    profiler logs never collide.
 
     Also captures the application's stdout from the first repeat --- this is
     a real execution (unlike a ``--compile-only`` prescreen), so its stdout is
@@ -384,14 +654,29 @@ def _profile_repeated(
 
     Args:
         triton_script: Triton application script to run.
-        kernel_name:   ``ncu -k`` filter (exact name or ``regex:...``).
+        kernel_name:   Kernel filter (exact name or ``regex:...``); see
+                       :func:`_run_ncu` / :func:`_run_rocprof`. Unused (may be
+                       ``None``) when ``profiler="wall"``.
         output_dir:    Parent directory; each repeat writes into
                        ``output_dir/rep_NN/``.
         repeats:       Number of full process re-invocations.
-        launch_skip:   Forwarded to each repeat's :func:`_run_ncu` call.
-        timeout:       Forwarded to each repeat's :func:`_run_ncu` call.
-        ncu_path:      ``ncu`` executable to invoke.
-        metrics:       Forwarded to each repeat's :func:`_run_ncu` call.
+        launch_skip:   With ``profiler="ncu"``, forwarded to
+                       :func:`_run_ncu` (native ``--launch-skip``).  With
+                       ``profiler="rocprof"``, rocprofv3 has no equivalent
+                       flag, so the first *launch_skip* launches of each
+                       repeat are dropped here instead, after parsing.
+                       Meaningless for ``profiler="wall"`` (one sample per
+                       repeat, nothing to skip within it) --- ignored there.
+        timeout:       Forwarded to each repeat's profiler call.
+        profiler:      ``"ncu"`` (default), ``"rocprof"``, or ``"wall"`` (no
+                       GPU profiler at all --- whole-process wall-clock time
+                       via :func:`_run_walltime`, for environments where
+                       kernel-level profiling tools can't be used).
+        ncu_path:      ``ncu`` executable to invoke (``profiler="ncu"`` only).
+        metrics:       Forwarded to each repeat's :func:`_run_ncu` call
+                       (``profiler="ncu"`` only).
+        rocprof_path:  ``rocprofv3`` executable to invoke
+                       (``profiler="rocprof"`` only).
 
     Returns:
         Tuple of (all per-launch metric dicts from every repeat, concatenated;
@@ -401,8 +686,17 @@ def _profile_repeated(
     stdout_text = ""
     for i in range(repeats):
         rep_dir = output_dir / f"rep_{i:02d}"
-        samples.extend(
-            _run_ncu(
+        if profiler == "wall":
+            rep_launches = _run_walltime(triton_script, rep_dir, timeout=timeout)
+        elif profiler == "rocprof":
+            rep_launches = _run_rocprof(
+                triton_script, kernel_name, rep_dir,
+                timeout=timeout, rocprof_path=rocprof_path,
+            )
+            if launch_skip:
+                rep_launches = rep_launches[launch_skip:]
+        else:
+            rep_launches = _run_ncu(
                 triton_script,
                 kernel_name,
                 rep_dir,
@@ -411,7 +705,7 @@ def _profile_repeated(
                 ncu_path=ncu_path,
                 metrics=metrics,
             )
-        )
+        samples.extend(rep_launches)
         if i == 0:
             stdout_path = rep_dir / "app_stdout.txt"
             if stdout_path.exists():
@@ -452,7 +746,7 @@ def run_perf(
     library: Path,
     output_dir: Path,
     *,
-    kernel_name: str,
+    kernel_name: str | None = None,
     primary_metric: str = _DEFAULT_PRIMARY_METRIC,
     repeats: int = _DEFAULT_REPEATS,
     launch_skip: int = 0,
@@ -460,6 +754,8 @@ def run_perf(
     max_sites: int | None = None,
     run_timeout: float | None = None,
     ncu_metrics: str | None = None,
+    profiler: str = "ncu",
+    rocprof_path: str = _DEFAULT_ROCPROF_PATH,
 ) -> list[dict]:
     """Measure the performance impact of every codegen-changed, non-crashed flip.
 
@@ -497,7 +793,9 @@ def run_perf(
                           in place, one byte at a time.
         output_dir:       Root directory for the golden backup, per-run
                           Triton caches, ncu logs, and the final report.
-        kernel_name:      ``ncu -k`` filter identifying the kernel to time.
+        kernel_name:      ``ncu -k`` filter identifying the kernel to time
+                          (or the rocprof equivalent). Unused, may be
+                          ``None``, when ``profiler="wall"``.
         primary_metric:   Which metric from the ``basic`` set (as ncu's
                           display name, e.g. ``"Duration"``,
                           ``"Compute (SM) Throughput"``) drives the
@@ -513,14 +811,29 @@ def run_perf(
                           median) at or above which a flip is flagged
                           ``regressed``.
         max_sites:        Profile at most this many candidates (debug cap).
-        run_timeout:      Per-``ncu``-invocation timeout in seconds.
+        run_timeout:      Per-profiler-invocation timeout in seconds.
         ncu_metrics:      Comma-separated raw ``ncu`` metric names to collect
                           instead of the full ``basic`` set --- see
                           :func:`_run_ncu`. When set, *primary_metric* must
                           match one of these metrics' ncu CSV display name,
                           not necessarily ``"Duration"`` (the default assumes
                           the ``basic`` set, which always has a ``"Duration"``
-                          row).
+                          row). Only valid with ``profiler="ncu"``.
+        profiler:         ``"ncu"`` (default, NVIDIA/Nsight Compute),
+                          ``"rocprof"`` (AMD/ROCm, via ``rocprofv3
+                          --kernel-trace``), or ``"wall"`` (no GPU profiler at
+                          all --- whole-process wall-clock time via
+                          :func:`_run_walltime`; use this when no kernel-level
+                          profiler can be used at all, e.g. this environment's
+                          ``rocprofv3`` breaks HIP device-count enumeration
+                          for any process that imports ``vllm``). rocprof
+                          mode only ever collects ``Duration`` (kernel-
+                          timestamp delta, nanoseconds) plus a few free
+                          register/grid-size columns --- no ``basic``-set
+                          equivalent exists for ROCm, so *ncu_metrics* is
+                          rejected in both rocprof and wall mode.
+        rocprof_path:     ``rocprofv3`` executable to invoke
+                          (``profiler="rocprof"`` only).
 
     Returns:
         List of per-flip result dicts, one per successfully profiled
@@ -529,6 +842,18 @@ def run_perf(
         computed from *primary_metric*), and ``stdout_changed`` (the real,
         measured value from this run --- not copied from *report_json*).
     """
+    if profiler not in ("ncu", "rocprof", "wall"):
+        raise PerfError(
+            f"profiler must be 'ncu', 'rocprof', or 'wall', got {profiler!r}"
+        )
+    if profiler in ("rocprof", "wall") and ncu_metrics is not None:
+        raise PerfError(
+            f"ncu_metrics is not valid with profiler={profiler!r} --- only "
+            "Duration is collected in this mode"
+        )
+    if profiler in ("ncu", "rocprof") and kernel_name is None:
+        raise PerfError(f"kernel_name is required with profiler={profiler!r}")
+
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -562,7 +887,7 @@ def run_perf(
 
     # --- baseline ---
     logger.info(
-        f"Running baseline ncu profile ({repeats}x, library untouched)..."
+        f"Running baseline {profiler} profile ({repeats}x, library untouched)..."
     )
     baseline_launches, baseline_stdout = _profile_repeated(
         triton_script,
@@ -571,13 +896,15 @@ def run_perf(
         repeats=repeats,
         launch_skip=launch_skip,
         timeout=run_timeout,
+        profiler=profiler,
         metrics=ncu_metrics,
+        rocprof_path=rocprof_path,
     )
     baseline_metrics = _medians(baseline_launches)
     if primary_metric not in baseline_metrics:
         raise PerfError(
-            f"primary_metric {primary_metric!r} not found in ncu output --- "
-            f"available metrics: {sorted(baseline_metrics)}",
+            f"primary_metric {primary_metric!r} not found in {profiler} output "
+            f"--- available metrics: {sorted(baseline_metrics)}",
             context={"primary_metric": primary_metric},
         )
     baseline_primary = baseline_metrics[primary_metric]
@@ -624,17 +951,19 @@ def run_perf(
                         repeats=repeats,
                         launch_skip=launch_skip,
                         timeout=run_timeout,
+                        profiler=profiler,
                         metrics=ncu_metrics,
+                        rocprof_path=rocprof_path,
                     )
             except PerfError as exc:
-                logger.warning(f"[{flip_id}] ncu failed: {exc}")
+                logger.warning(f"[{flip_id}] {profiler} failed: {exc}")
                 progress.advance(task)
                 continue
 
             flip_metrics = _medians(flip_launches)
             if primary_metric not in flip_metrics:
                 logger.warning(
-                    f"[{flip_id}] ncu produced no {primary_metric!r} sample --- skipping"
+                    f"[{flip_id}] {profiler} produced no {primary_metric!r} sample --- skipping"
                 )
                 progress.advance(task)
                 continue
