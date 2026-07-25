@@ -269,6 +269,7 @@ def _run_ncu(
     timeout: float | None = None,
     ncu_path: str = "ncu",
     metrics: str | None = None,
+    script_args: list[str] | None = None,
 ) -> list[dict[str, float]]:
     """Profile *triton_script* once under ``ncu`` (no GDB).
 
@@ -295,6 +296,10 @@ def _run_ncu(
                        collects only those, in as few replay passes as they
                        need, typically one. ``None`` (default) keeps the
                        original ``--set basic`` behavior.
+        script_args:   Extra CLI arguments appended after *triton_script* in
+                       the profiled command line, e.g. ``["--model", "llama"]``
+                       for a script with its own argparse interface. ``None``
+                       (default) passes none, matching prior behavior.
 
     Returns:
         One ``{metric_name: value}`` dict per matched kernel launch (see
@@ -321,7 +326,7 @@ def _run_ncu(
     ]
     if launch_skip:
         cmd += ["--launch-skip", str(launch_skip)]
-    cmd += ["--", sys.executable, str(triton_script)]
+    cmd += ["--", sys.executable, str(triton_script), *(script_args or [])]
 
     try:
         # start_new_session=True + killpg on timeout: plain subprocess.run's
@@ -436,6 +441,7 @@ def _run_rocprof(
     *,
     timeout: float | None = None,
     rocprof_path: str = _DEFAULT_ROCPROF_PATH,
+    script_args: list[str] | None = None,
 ) -> list[dict[str, float]]:
     """Profile *triton_script* once under ``rocprofv3 --kernel-trace`` (no GDB).
 
@@ -486,7 +492,7 @@ def _run_rocprof(
         "-f", "csv",
         "-d", str(trace_dir),
         "--",
-        sys.executable, str(triton_script),
+        sys.executable, str(triton_script), *(script_args or []),
     ]
 
     try:
@@ -551,6 +557,7 @@ def _run_walltime(
     output_dir: Path,
     *,
     timeout: float | None = None,
+    script_args: list[str] | None = None,
 ) -> list[dict[str, float]]:
     """Time one full run of *triton_script* end-to-end, no profiler involved.
 
@@ -587,7 +594,7 @@ def _run_walltime(
     env[ENV_TRITON_CACHE] = str(output_dir / "triton_cache")
     env[ENV_ALWAYS_COMPILE] = "1"
 
-    cmd = [sys.executable, str(triton_script)]
+    cmd = [sys.executable, str(triton_script), *(script_args or [])]
 
     start_ns = time.perf_counter_ns()
     try:
@@ -636,6 +643,7 @@ def _profile_repeated(
     ncu_path: str = _DEFAULT_NCU_PATH,
     metrics: str | None = None,
     rocprof_path: str = _DEFAULT_ROCPROF_PATH,
+    script_args: list[str] | None = None,
 ) -> tuple[list[dict[str, float]], str]:
     """Run :func:`_run_ncu`, :func:`_run_rocprof`, or :func:`_run_walltime` *repeats* times.
 
@@ -677,6 +685,10 @@ def _profile_repeated(
                        (``profiler="ncu"`` only).
         rocprof_path:  ``rocprofv3`` executable to invoke
                        (``profiler="rocprof"`` only).
+        script_args:   Extra CLI arguments appended after *triton_script* for
+                       every repeat, e.g. ``["--model", "llama"]`` for a script
+                       with its own argparse interface. ``None`` (default)
+                       passes none.
 
     Returns:
         Tuple of (all per-launch metric dicts from every repeat, concatenated;
@@ -687,11 +699,13 @@ def _profile_repeated(
     for i in range(repeats):
         rep_dir = output_dir / f"rep_{i:02d}"
         if profiler == "wall":
-            rep_launches = _run_walltime(triton_script, rep_dir, timeout=timeout)
+            rep_launches = _run_walltime(
+                triton_script, rep_dir, timeout=timeout, script_args=script_args
+            )
         elif profiler == "rocprof":
             rep_launches = _run_rocprof(
                 triton_script, kernel_name, rep_dir,
-                timeout=timeout, rocprof_path=rocprof_path,
+                timeout=timeout, rocprof_path=rocprof_path, script_args=script_args,
             )
             if launch_skip:
                 rep_launches = rep_launches[launch_skip:]
@@ -704,6 +718,7 @@ def _profile_repeated(
                 timeout=timeout,
                 ncu_path=ncu_path,
                 metrics=metrics,
+                script_args=script_args,
             )
         samples.extend(rep_launches)
         if i == 0:
