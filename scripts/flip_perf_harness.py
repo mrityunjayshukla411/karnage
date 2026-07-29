@@ -106,23 +106,29 @@ MODELS: dict[str, str] = {
 # it from the model config and available memory never was the constraint (see
 # below); every one of the 5 target models started fine with it auto-derived.
 #
-# --max-model-len IS set, to 4000, but not arbitrarily: gemma-2-9b's bf16
-# weights (~18GB) leave only ~1.3GB of this GPU's ~19.3GB budget (24GB total *
-# --gpu-memory-utilization 0.8) for KV cache. Empirically (real vllm serve
-# launches, not guessed), gemma's native 8192-token context needs 2.3GB of KV
-# cache to fit even one request and fails to start; vLLM's own OOM error
-# reports the actual safe ceiling at this memory budget as ~4032 tokens. 4000
-# is a small safety margin under that. Applied uniformly (not per-model) even
-# though qwen/mistral (32768 native) and llama (131072 native, ~30288 safe
-# ceiling) could individually support far more -- since every comparison in
-# this harness is baseline-vs-flipped *within* one model, not across models,
-# the only reason to cap the others is a deliberate choice for a single
-# consistent context length across the whole experiment, not a memory need.
+# --max-model-len and --gpu-memory-utilization are CLI overrides (see
+# build_parser()), not baked in here, because the right value is memory-
+# constrained per model rather than a single constant that fits all five:
+# gemma-2-9b's bf16 weights (~18GB) leave only ~1.3GB of this GPU's ~19.3GB
+# budget (24GB total * the 0.8 default utilization) for KV cache, and
+# empirically (real vllm serve launches, not guessed) that's only enough for
+# a max_model_len around 1500-4000 depending on run-to-run engine overhead
+# variance -- one measured run needed max_model_len <=~4032 to fit, another
+# only <=~1520. The default --max-model-len 4000 matches the original
+# measurement's margin and works for qwen/llama/mistral/deepseek (whose
+# native contexts are all much larger, so 4000 is a deliberate shared cap for
+# consistency, not a memory need -- see below); gemma needs a lower
+# --max-model-len override when it doesn't fit. ShareGPT samples are already
+# filtered by vLLM's is_valid_sequence() defaults to prompt+output <= 2048
+# tokens (see DATASET_FLAGS below), so lowering --max-model-len to 2048
+# doesn't drop or truncate any request that would otherwise have been sent --
+# it only shrinks the KV-cache reservation for a length nothing ever reaches.
+# Going lower than 2048 would start rejecting real samples at the engine
+# (context-length-exceeded), which desyncs correctness_gate()'s positional
+# comparison against the golden set -- so 2048 is the practical floor.
 COMMON_ENGINE_FLAGS: list[str] = [
     "--attention-backend", "TRITON_ATTN",
-    "--gpu-memory-utilization", "0.8",
     "--dtype", "bfloat16",
-    "--max-model-len", "4000",
     "--enforce-eager",
 ]
 
@@ -166,7 +172,7 @@ CSV_FIELDS = [
     "error", "rep_dir", "rep_start_ts", "duration_s",
 ]
 
-_DEFAULT_LIBRARY = _REPO_ROOT / ".envs/vllm/lib/python3.12/site-packages/triton/_C/libtriton.so"
+_DEFAULT_LIBRARY = _REPO_ROOT / "../.envs/vllm/lib/python3.12/site-packages/triton/_C/libtriton.so"
 _DEFAULT_FLIP_SITES = _REPO_ROOT / "flip_sites.json"
 
 _ABORT = False
@@ -325,6 +331,8 @@ def launch_vllm_serve(
         "--host", "127.0.0.1",
         "--port", str(port),
         "--seed", str(args.seed),
+        "--max-model-len", str(args.max_model_len),
+        "--gpu-memory-utilization", str(args.gpu_memory_utilization),
         *COMMON_ENGINE_FLAGS,
     ]
     log_f = open(log_path, "w")
@@ -368,6 +376,18 @@ def run_bench_serve(
         "--result-filename", result_path.name,
         *DATASET_FLAGS,
     ]
+    if args.max_concurrency is not None:
+        # Caps in-flight requests so num_prompts are sent (mostly) sequentially
+        # instead of vllm bench serve's default of firing all of them at once
+        # (request_rate=inf, max_concurrency=None) and letting the server's
+        # continuous batching mix them together -- lets the same flip_id be
+        # measured under single-request-at-a-time conditions vs. the harness's
+        # normal heavily-batched conditions. Use a separate --output-dir per
+        # --max-concurrency value: raw_results.csv's resumability key doesn't
+        # include concurrency, so mixing values into one output dir would
+        # either silently skip reps as "already completed" or blend rows from
+        # different concurrency regimes under the same key.
+        cmd += ["--max-concurrency", str(args.max_concurrency)]
     log_path = rep_dir / "bench_serve.log"
     with open(log_path, "w") as log_f:
         proc = subprocess.run(
@@ -827,6 +847,22 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Path to the real, loaded libtriton.so -- patched on disk in place")
     ap.add_argument("--models", type=str, default=None, metavar="name1,name2,...",
                      help=f"Subset of {{{','.join(MODELS)}}} to run (default: all)")
+    ap.add_argument("--max-model-len", type=int, default=4000, metavar="N",
+                     help="vllm serve --max-model-len (default: 4000, fits qwen/llama/mistral/"
+                          "deepseek comfortably). gemma-2-9b is tight on KV-cache memory at this "
+                          "value and may need a lower override (e.g. 2048) to avoid an OOM at "
+                          "engine startup -- see COMMON_ENGINE_FLAGS's comment for why 2048 costs "
+                          "nothing in coverage (ShareGPT samples here never exceed 2048 tokens "
+                          "anyway) while going lower risks rejecting real samples mid-run.")
+    ap.add_argument("--gpu-memory-utilization", type=float, default=0.8, metavar="FRAC",
+                     help="vllm serve --gpu-memory-utilization (default: 0.8). Raise this (e.g. "
+                          "0.85) alongside a lower --max-model-len if a model still doesn't fit.")
+    ap.add_argument("--max-concurrency", type=int, default=None, metavar="N",
+                     help="vllm bench serve --max-concurrency (default: None, i.e. vllm bench "
+                          "serve's own default of unlimited/all-at-once -- the harness's normal "
+                          "heavily-batched measurement). Set to 1 to measure single-request-at-a-"
+                          "time conditions instead. Use a separate --output-dir per value used -- "
+                          "see run_bench_serve()'s comment for why mixing them in one dir is unsafe.")
     ap.add_argument("--reps", type=int, default=10, metavar="N",
                      help="Repetitions per condition (baseline and flipped, run as two blocks) "
                           "per (model, flip_site, num_prompts) cell -- single-scale fallback, "
