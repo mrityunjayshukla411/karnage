@@ -172,7 +172,7 @@ CSV_FIELDS = [
     "error", "rep_dir", "rep_start_ts", "duration_s",
 ]
 
-_DEFAULT_LIBRARY = _REPO_ROOT / "../.envs/vllm/lib/python3.12/site-packages/triton/_C/libtriton.so"
+_DEFAULT_LIBRARY = _REPO_ROOT / ".envs/vllm/lib/python3.12/site-packages/triton/_C/libtriton.so"
 _DEFAULT_FLIP_SITES = _REPO_ROOT / "flip_sites.json"
 
 _ABORT = False
@@ -388,6 +388,23 @@ def run_bench_serve(
         # either silently skip reps as "already completed" or blend rows from
         # different concurrency regimes under the same key.
         cmd += ["--max-concurrency", str(args.max_concurrency)]
+    if args.hf_output_len is not None:
+        # Forces a fixed output length instead of ConversationDataset.sample()'s
+        # default dynamic mode (derive output_len from the real assistant
+        # completion's own token count). Needed as a workaround for a vLLM
+        # bug: when dynamic, a ShareGPT conversation whose completion tokenizes
+        # to zero tokens under a given model's tokenizer hits
+        # `assert output_len > 0` in datasets.py *before* the very next line's
+        # is_valid_sequence() check would otherwise have skipped it -- fatal,
+        # not recoverable by retrying, since --seed is fixed and this is fully
+        # deterministic. Observed with deepseek-llm-7b-chat's tokenizer at
+        # n=1000 (qwen/llama/mistral's tokenizers didn't hit exactly 0 tokens
+        # on whatever conversation triggers it, but nothing guarantees that
+        # holds at other scales). Fixing this changes what's measured -- every
+        # request now generates exactly this many tokens instead of however
+        # long the model would naturally continue -- so only pass it for a
+        # model that actually needs it, not harness-wide.
+        cmd += ["--hf-output-len", str(args.hf_output_len)]
     log_path = rep_dir / "bench_serve.log"
     with open(log_path, "w") as log_f:
         proc = subprocess.run(
@@ -863,6 +880,13 @@ def build_parser() -> argparse.ArgumentParser:
                           "heavily-batched measurement). Set to 1 to measure single-request-at-a-"
                           "time conditions instead. Use a separate --output-dir per value used -- "
                           "see run_bench_serve()'s comment for why mixing them in one dir is unsafe.")
+    ap.add_argument("--hf-output-len", type=int, default=None, metavar="N",
+                     help="vllm bench serve --hf-output-len (default: None, i.e. dynamic -- output "
+                          "length derived per-request from the real ShareGPT completion's own token "
+                          "count). Set to a fixed positive value (e.g. 128) to work around a vLLM "
+                          "assertion crash some tokenizers hit in dynamic mode -- see "
+                          "run_bench_serve()'s comment for the exact failure and why it's not "
+                          "recoverable without this override.")
     ap.add_argument("--reps", type=int, default=10, metavar="N",
                      help="Repetitions per condition (baseline and flipped, run as two blocks) "
                           "per (model, flip_site, num_prompts) cell -- single-scale fallback, "
